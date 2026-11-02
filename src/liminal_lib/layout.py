@@ -18,9 +18,51 @@ day: "i think im gonna need mongo for downloading business records/tax filings e
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+
+# -- the workspace -------------------------------------------------------------------------------
+# The user, 2026-11-02: "common, app and store are the required folders, plugins as well, make sure
+# the app is in the app folder, make sure the integrator is in the store w/ the databases, make sure
+# plugins get loaded in to plugins, and lib is in common". One folder holds the four: common/ the
+# library's checkout (liminal-lib), app/ the chart app's (liminal), store/ the integrator's
+# (liminal-integrator) with the databases in store/data/, plugins/ a checkout per plugin, loaded
+# from there (sources/registry.py: the plugin directory the fetcher assigns).
+HOME_VAR = "LIMINAL_HOME"
+PLUGINS_VAR = "LIMINAL_PLUGINS"
+FOLDERS = ("common", "app", "store", "plugins")
+DATA = "data"  # the databases, in store/
+
+
+def home() -> Path | None:
+    """The workspace: LIMINAL_HOME, else the folder above this library's checkout (common/) when
+    it has the four folders. None: the programs are installed some other way (the data in
+    ~/LiminalData, the plugins as installed packages)."""
+    named = os.environ.get(HOME_VAR)
+    if named:
+        return Path(named).expanduser()
+    root = Path(__file__).resolve().parents[3]  # src/liminal_lib/layout.py: src, common, the workspace
+    return root if all((root / f).is_dir() for f in FOLDERS) else None
+
+
+def data_dir() -> Path:
+    """The databases' folder: store/data in the workspace (the integrator "w/ the databases"),
+    else ~/LiminalData. LIMINAL_DB names the main file itself and overrides it."""
+    root = home()
+    return root / "store" / DATA if root is not None else Path.home() / "LiminalData"
+
+
+def plugins_dir() -> Path | None:
+    """The plugins' folder, a checkout per plugin, each loaded from there: LIMINAL_PLUGINS, else
+    plugins/ in the workspace. None: no such folder (the plugins are installed packages)."""
+    named = os.environ.get(PLUGINS_VAR)
+    if named:
+        return Path(named).expanduser()
+    root = home()
+    return root / "plugins" if root is not None else None
+
 
 MAIN = "liminal.db"  # the main file, wherever LIMINAL_DB puts it
 FEEDS = "feeds"

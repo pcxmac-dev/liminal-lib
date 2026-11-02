@@ -40,9 +40,11 @@ from __future__ import annotations
 import importlib
 import math
 import pkgutil
+import sys
 import threading
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 from .. import layout
@@ -612,9 +614,57 @@ def _load(where: str, load: Callable[[], object], origin: str, version: str,
             found.append(p if p.version or not version else replace(p, version=version))
 
 
+def plugin_checkouts(folder: Path) -> list[tuple[str, Path, str, str]]:
+    """The plugin checkouts in `folder` (the plugin directory, layout.plugins_dir): each subfolder
+    whose pyproject.toml declares entry points of this contract's group, as (the checkout's name,
+    the folder its package imports from (src/, else itself), 'module:attr', its version)."""
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10: the installed packages' entry points alone
+        return []
+    out: list[tuple[str, Path, str, str]] = []
+    if not folder.is_dir():
+        return out
+    for sub in sorted(p for p in folder.iterdir() if p.is_dir()):
+        pyproject = sub / "pyproject.toml"
+        if not pyproject.is_file():
+            continue
+        try:
+            project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project") or {}
+        except (OSError, ValueError):
+            continue
+        src = sub / "src"
+        for value in ((project.get("entry-points") or {}).get(ENTRY_POINTS) or {}).values():
+            out.append((sub.name, src if src.is_dir() else sub, str(value), str(project.get("version") or "")))
+    return out
+
+
+def _directory_plugins(found: list, errors: list[tuple[str, str]]) -> set[str]:
+    """The checkouts of the plugin directory loaded (the user, 2026-11-01: "all plugins must be in a
+    plugin directory assigned by the fetcher"; 2026-11-02: "make sure plugins get loaded in to
+    plugins"), each one's package imported from its own folder. Returns the entry point values
+    loaded, so the same plugin installed as a package besides is not loaded twice."""
+    folder = layout.plugins_dir()
+    loaded: set[str] = set()
+    if folder is None:
+        return loaded
+    for name, src, value, version in plugin_checkouts(folder):
+        if str(src) not in sys.path:
+            sys.path.append(str(src))
+        module_name, _, attr = value.partition(":")
+
+        def load(module_name=module_name, attr=attr):
+            module = importlib.import_module(module_name)
+            return getattr(module, attr) if attr else module
+        _load(f"{name} ({value})", load, f"plugins/{name} ({value})", version, found, errors)
+        loaded.add(value)
+    return loaded
+
+
 def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
-    """Every provider plugin: the built-in modules, then the installed packages' entry points.
-    Returns (providers by name in their order, [(where, why)] for the ones left out)."""
+    """Every provider plugin: the built-in modules, the plugin directory's checkouts, then the
+    installed packages' entry points. Returns (providers by name in their order, [(where, why)]
+    for the ones left out)."""
     providers_, _, errors_ = discover_all()
     return providers_, errors_
 
@@ -630,7 +680,10 @@ def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tupl
     for info in sorted(pkgutil.iter_modules(plugins.__path__), key=lambda m: m.name):
         where = f"{plugins.__name__}.{info.name}"
         _load(where, lambda: importlib.import_module(where), "built in", "", found, errors)
+    loaded = _directory_plugins(found, errors)
     for ep in _entry_points():
+        if ep.value in loaded:
+            continue  # the plugin directory's checkout of it is loaded already
         dist, version = _distribution(ep)
         _load(f"{ep.name} ({ep.value})", ep.load, f"package: {dist} ({ep.value})" if dist else f"package: {ep.value}",
               version, found, errors)

@@ -16,5 +16,9 @@ recorder (`live.py`), the composites, derived frames and provenance, the dataset
 The modules keep their names from the app they came out of: the app imports them as `liminal.<module>` through
 its own package until every import points here (`import liminal_lib.<module>`).
 
+The workspace (`layout.py`): one folder holds `common/` (this library's checkout), `app/` (the chart app),
+`store/` (the integrator, the databases in `store/data/`) and `plugins/` (a checkout per plugin, loaded from
+there by the registry). Found by its four folders above this checkout, or named by `LIMINAL_HOME`.
+
 Install: `pip install -e .` (the app and the integrator depend on it). Tests: `python -m pytest -q` (the full
 suite still runs in the app's repository, with the library installed; it moves here module by module).

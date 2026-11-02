@@ -61,8 +61,11 @@ from datetime import date
 from pathlib import Path
 from typing import Mapping, MutableMapping
 
-# Stock data lives on this machine, outside the repository, so it never ends up in git.
-DEFAULT_DB_PATH = Path.home() / "LiminalData" / "liminal.db"
+from . import layout
+
+# Stock data lives on this machine, never in git: store/data in the workspace (layout.home),
+# else ~/LiminalData.
+DEFAULT_DB_PATH = layout.data_dir() / layout.MAIN
 # The app's settings by the names they had before the project was renamed (massive -> liminal,
 # 2026-11-01): still read where the new name is not set. The Massive provider's keep their names.
 RENAMED = {f"LIMINAL_{n}": f"MASSIVE_{n}"
