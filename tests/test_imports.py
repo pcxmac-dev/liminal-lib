@@ -24,5 +24,5 @@ def test_every_module_imports_without_the_app():
 def test_the_version_and_the_thread_setting():
     import os
 
-    assert liminal_lib.__version__ == "1.2.0"
+    assert liminal_lib.__version__ == "1.2.1"
     assert os.environ.get("OPENBLAS_NUM_THREADS") == "1"  # set before numpy loads, by the library

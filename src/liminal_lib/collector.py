@@ -660,10 +660,10 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     mic = inst.primary_exchange.mic if inst.primary_exchange else None
     if item["exchange"] and mic and mic != item["exchange"] and (is_foreign(item["exchange"]) or is_foreign(mic)):
         # A listing outside the US keeps its exchange here: its ticker carries it (7203.T), and a
-        # record naming another exchange is another listing (VOD.L is not VOD on XNAS), never a move.
-        store.set_listing(source.name, ticker, item["listed_from"], item["figi"], today)  # checked: in a week again
+        # record naming another exchange is another listing (VOD.L is not VOD on XNAS), never a
+        # move; the record still says who the instrument is (its listing date, FIGI and details).
         log(f"{ticker}: {source.name} lists it on {mic}; a listing on {item['exchange']} keeps its exchange here")
-        return Listing(True, item["listed_from"])
+        mic = item["exchange"]
     if item["exchange"] and mic and mic != item["exchange"]:
         # Moved exchange (BCPC: "listed on XNAS, not XNYS"): skipped, it got no data, cost a request
         # per feed per run and, never finishing its minutes, held back every stock's 1-second pass.

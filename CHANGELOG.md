@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 (2026-11-02)
+
+A listing outside the US whose source names another exchange keeps its exchange and still takes the record's
+identity (listing date, FIGI, name, details): 1.2.0 returned before recording it, so the listing was never dated
+and its daily history waited for a date that would not come.
+
 ## 1.2.0 (2026-11-02)
 
 Stocks listed outside the US (the user: "update existing plugins, add exchanges where applicable and symbols").
