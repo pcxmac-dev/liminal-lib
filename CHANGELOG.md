@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.3 (2026-11-03)
+
+`coverage.same_market` says no for two feeds neither of which has a market for an asset class (it said yes, two
+blanks being equal): the app's one-feed-per-span check counted Bitstamp's and Coinbase's trades of a pair no
+longer watched as one market's double download.
+
 ## 1.2.2 (2026-11-03)
 
 Found going through the fetcher's page plugin by plugin (the user: "go through the UI and look for discrepancies"):
