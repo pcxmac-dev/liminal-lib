@@ -146,7 +146,9 @@ FIRST_REAP_SECONDS = 2 * LOCK_CHECK_SECONDS
 # downloads it). A waiting trade is a dict of about TRADE_BYTES (its keys shared): some 110,000.
 MAX_BUFFERED_BYTES = 64 * 2**20
 TRADE_BYTES = 600
-RECORDER_COMMAND = re.compile(r"-m\s+liminal\s+live\s*$")  # a recorder (not `live status`, `live stop`)
+# a recorder (not `live status`, `live stop`): `python -m liminal_app live`, `liminal live` (the console
+# script, `liminal.exe` on Windows), or the old module name
+RECORDER_COMMAND = re.compile(r"(?:-m\s+liminal(?:_app)?|[\\/]liminal(?:\.exe)?|^liminal(?:\.exe)?)\s+live\s*$")
 DAY_MS = 86_400_000
 
 

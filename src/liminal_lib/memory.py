@@ -18,7 +18,7 @@ import ctypes
 import os
 import time
 
-APP = "liminal"
+APP = "liminal_app"  # the app's module (python -m liminal_app ...); its console script is `liminal` (resources.APP_WORDS)
 MB = 2**20
 
 
@@ -108,7 +108,9 @@ def _active_cache() -> dict | None:
 
 def _role(command: str) -> str:
     """What an app process is, from its command line: gui, sync, live, ..."""
-    rest = command.split(APP, 1)[1].split()
+    from .resources import app_args
+
+    rest = app_args(command) or []
     words = [w for i, w in enumerate(rest) if not w.startswith("-") and (i == 0 or rest[i - 1] != "--source")]
     return " ".join(words[:2]) if words[:1] == ["admin"] else (words[0] if words else "?")
 
@@ -116,10 +118,11 @@ def _role(command: str) -> str:
 def app_processes() -> list[dict]:
     """The app's processes but this one: {pid, role, command}. A virtual environment starts each
     through a small launcher with the same command line, whose child does the work: the child is
-    listed."""
+    listed. The app's name in a command line is its module or its console script (resources.app_args)."""
     from . import proc
+    from .resources import app_args
 
-    rows = [(pid, ppid, cmd) for pid, ppid, cmd in proc.processes() if f"-m {APP}" in cmd or f"{APP}.exe" in cmd]
+    rows = [(pid, ppid, cmd) for pid, ppid, cmd in proc.processes() if app_args(cmd) is not None]
     launchers = {ppid for pid, ppid, cmd in rows if any(p == ppid and c == cmd for p, _, c in rows)}
     return [{"pid": pid, "role": _role(cmd), "command": cmd} for pid, ppid, cmd in rows
             if pid not in launchers and pid != os.getpid()]

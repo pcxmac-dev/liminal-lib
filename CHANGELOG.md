@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1 (2026-11-02)
+
+The Resources sampler reads the app's processes under their new names: `python -m liminal_app ...` and the
+console script (`liminal ...`, `liminal.exe` on Windows), the old module name still (`resources.APP_WORDS`).
+
 ## 1.1.0 (2026-11-02)
 
 The app is liminal-app (the user: "lets rename the app to liminal-app", "not liminal", "refactor"): hosts start as

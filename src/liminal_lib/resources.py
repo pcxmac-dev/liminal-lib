@@ -97,14 +97,33 @@ LOOPBACK = ("127.", "::1", "0.0.0.0", "::")
 REMOTES = 6  # remote endpoints listed per process (the busiest)
 
 
+APP_WORDS = ("liminal_app", "liminal")  # the app's module (python -m liminal_app ...) and its console script (liminal ...)
+
+
+def _app_index(words: list[str]) -> int | None:
+    """Where the app's name sits in a command line: `python -m liminal_app gui`, `liminal gui`,
+    `C:\\...\\Scripts\\liminal.exe gui` (the console script; the old module name is read the same way)."""
+    for i, word in enumerate(words):
+        name = word.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+        if name in APP_WORDS:
+            return i
+    return None
+
+
+def app_args(command: str) -> list[str] | None:
+    """The words after the app's name in a command line (`gui --port 8765` of `python -m liminal_app
+    gui --port 8765`); None when the command is not the app's."""
+    words = command.replace('"', " ").split()
+    at = _app_index(words)
+    return None if at is None else words[at + 1:]
+
+
 def role_of(command: str) -> tuple[str, str, str]:
     """(role, label, args) of a liminal command line: `gui` is the chart app, `sync` the
     fetcher (with --source NAME --only, one feed's run: the feeds run side by side; with
     --tickers, a run for symbols opened in the chart), `live` the live recorder."""
-    words = command.replace('"', " ").split()
-    try:
-        args = words[words.index("liminal") + 1:]
-    except ValueError:
+    args = app_args(command)
+    if args is None:
         return "other", "Python", ""
     feed = args[1] if args[:1] == ["--source"] and len(args) > 1 else None
     rest = args[2:] if feed else args  # the options before the command
@@ -120,7 +139,7 @@ def role_of(command: str) -> tuple[str, str, str]:
 
 
 def is_app(command: str) -> bool:
-    return "liminal" in command.replace('"', " ").split()
+    return _app_index(command.replace('"', " ").split()) is not None
 
 
 def is_local(address: str) -> bool:
