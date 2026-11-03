@@ -230,8 +230,12 @@ def wanted_stocks(store, now_ms: int, watchlists: bool = True) -> tuple[str, ...
     out = open_symbols(store, now_ms)
     for lst in active_watchlists(store) if watchlists else ():
         out += (lst.get("tickers") or []) if isinstance(lst, dict) else []
+    from .models import is_foreign
+
     out = [t.upper() for t in out if isinstance(t, str) and 0 < len(t) <= 32]
-    stocks = (t for t in dict.fromkeys(out) if any(w["asset"] == "stock" for w in store.watchlist(ticker=t)))
+    # US stocks alone: the streams are the US market's (a listing abroad, 7203.T, has none here)
+    stocks = (t for t in dict.fromkeys(out)
+              if any(w["asset"] == "stock" and not is_foreign(w.get("exchange")) for w in store.watchlist(ticker=t)))
     return tuple(t for _, t in zip(range(MAX_STOCKS), stocks))
 
 

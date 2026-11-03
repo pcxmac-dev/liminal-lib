@@ -72,7 +72,17 @@ def label(timespan: str, multiplier: int = 1) -> str:
 
 
 def day_zone(asset: str):
+    """The zone a day bar is stamped in: UTC days for crypto and forex, New York's midnight otherwise
+    (a stock listed outside the US too: its local date, stamped at midnight ET)."""
     return timezone.utc if asset in UTC_DAYS else ET
+
+
+def local_zone(asset: str, exchange: str | None = None):
+    """The zone a series' days are cut by: the exchange's own for a stock listed outside the US
+    (models.exchange_timezone), else the stamp's (day_zone)."""
+    from .models import exchange_timezone, is_foreign
+
+    return ZoneInfo(exchange_timezone(exchange)) if asset == "stock" and is_foreign(exchange) else day_zone(asset)
 
 
 def _midnight_ms(d: date, zone) -> int:
@@ -109,12 +119,16 @@ def _period_starts(times: pd.Series, timespan: str, zone) -> np.ndarray:
     return dates.map(starts).to_numpy(dtype="int64")
 
 
-def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str) -> list[dict]:
+def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str, exchange: str | None = None) -> list[dict]:
     """Bars of one frame from finer bars (columns ts, open, high, low, close, volume, vwap,
-    transactions, time), as feeds send them: t (bar start, ms), o, h, l, c, v, vw, n."""
+    transactions, time), as feeds send them: t (bar start, ms), o, h, l, c, v, vw, n. A stock listed
+    outside the US (`exchange`, its MIC): its days are its local calendar days, stamped at midnight
+    ET of the local date, every hour of them (no New York regular session), its weeks and months
+    from those stamps like any stock's."""
     m = bars
     zone = day_zone(asset)
-    if timespan == "day" and asset in ("stock", "index"):
+    local = local_zone(asset, exchange)
+    if timespan == "day" and asset in ("stock", "index") and local is zone:
         m = m[_regular(m["time"])]
     if m.empty:
         return []
@@ -126,8 +140,8 @@ def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str) ->
     elif timespan == "hour" and multiplier == 1:
         key = ts // 3_600_000 * 3_600_000  # whole-hour offsets: an hour is an hour in every zone
     elif timespan == "hour":  # by the wall clock from midnight: the same bins on a 23 or 25-hour day
-        wall = m["time"].dt.tz_convert(zone).dt.tz_localize(None).dt.floor(f"{multiplier}h")
-        key = pd.DatetimeIndex(wall).tz_localize(zone, ambiguous=np.ones(len(wall), dtype=bool),
+        wall = m["time"].dt.tz_convert(local).dt.tz_localize(None).dt.floor(f"{multiplier}h")
+        key = pd.DatetimeIndex(wall).tz_localize(local, ambiguous=np.ones(len(wall), dtype=bool),
                                                  nonexistent="shift_forward").as_unit("ms").asi8
     elif timespan in ("week", "month", "year"):
         key = _period_starts(m["time"], timespan, zone)
@@ -135,6 +149,9 @@ def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str) ->
         key = ts // 86_400_000 * 86_400_000
     elif asset == "future":  # the CME session: from 18:00 New York, dated by the day it ends
         key = pd.DatetimeIndex((m["time"].dt.tz_convert(ET) + pd.Timedelta(hours=6)).dt.normalize()).as_unit("ms").asi8
+    elif local is not zone:  # a listing abroad: its local date, stamped at New York's midnight of that date
+        dates = m["time"].dt.tz_convert(local).dt.date
+        key = dates.map({d: _midnight_ms(d, ET) for d in dates.unique()}).to_numpy(dtype="int64")
     else:  # the New York date, stamped at its midnight
         key = pd.DatetimeIndex(m["time"].dt.tz_convert(ET).dt.normalize()).as_unit("ms").asi8
     vol = m["volume"].fillna(0).to_numpy(dtype=float)
@@ -149,7 +166,7 @@ def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str) ->
             for t, o, h, l, c, v, w, n in zip(g.index, g["o"], g["h"], g["l"], g["c"], g["v"], vw, g["n"])]
 
 
-def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock") -> int:
+def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock", exchange: str | None = None) -> int:
     """Build (or rebuild) the frames above one base frame (CHAINS) for one series from what
     changed since the last build. Returns bars stored."""
     frames = dict(CHAINS)[base]
@@ -193,7 +210,7 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
             if base != "day":  # bins left without base bars go (weeks to years: all rebuilt below)
                 store.drop_built_frame(source, ticker, timespan, multiplier, lo_ms, hi_ms)
             if len(window):
-                bins = aggregate(window, timespan, multiplier, asset)
+                bins = aggregate(window, timespan, multiplier, asset, exchange)
                 if base != "day":  # this chunk's bins; the margin's belong to the chunks either side
                     bins = [b for b in bins if lo_ms <= b["t"] < hi_ms]
                 stored += store.upsert_built_bars(source, ticker, timespan, multiplier, bins, did)
@@ -269,25 +286,29 @@ def drop_lease(store, source: str, ticker: str) -> None:
 
 
 def build_symbol(store, source: str, ticker: str, asset: str = "stock", log=print,
-                 progress: tuple[int, int] = (1, 1)) -> int:
+                 progress: tuple[int, int] = (1, 1), exchange: str | None = None) -> int:
     """Every frame above every base frame one series holds (CHAINS: seconds, then minutes, then
     days, so days built from minutes feed the weeks), from what changed since its last build.
     `progress` (n, of) is what the status bar shows while it builds. One build of a series at a
-    time across processes (take_lease): another one going on, it is left to that. Returns bars stored."""
+    time across processes (take_lease): another one going on, it is left to that. `exchange`: the
+    MIC of a listing outside the US (found from its watch row when not given). Returns bars stored."""
+    if asset == "stock" and exchange is None:
+        exchange = exchange_of(store, source, ticker)
     if not take_lease(store, source, ticker):
         log(f"derive {source}:{ticker}: another process is building it; left to that one")
         return 0
     try:
-        return _build_symbol(store, source, ticker, asset, log, progress)
+        return _build_symbol(store, source, ticker, asset, log, progress, exchange)
     finally:
         drop_lease(store, source, ticker)
 
 
-def _build_symbol(store, source: str, ticker: str, asset: str, log, progress: tuple[int, int]) -> int:
+def _build_symbol(store, source: str, ticker: str, asset: str, log, progress: tuple[int, int],
+                  exchange: str | None = None) -> int:
     from . import baddata
 
     try:  # bad data first (baddata.py): the frames above are then built without it
-        pruned = baddata.scan_symbol(store, source, ticker, asset)
+        pruned = baddata.scan_symbol(store, source, ticker, asset, exchange)
         if pruned:
             log(f"bad data {source}:{ticker}: {pruned:,} bars on the pruned list (left out of the filtered view)")
     except Exception as e:  # a failing check must not stop the build; it is tried again next time
@@ -299,11 +320,19 @@ def _build_symbol(store, source: str, ticker: str, asset: str, log, progress: tu
         store.kv_set(PROGRESS_KEY, json.dumps({
             "source": source, "ticker": ticker, "from": label(base), "to": [label(t, m) for t, m in frames],
             "n": progress[0], "of": progress[1], "at": int(time_module.time() * 1000)}))
-        n = build_chain(store, source, ticker, base, asset)
+        n = build_chain(store, source, ticker, base, asset, exchange)
         if n:
             log(f"derive {source}:{ticker}: {n:,} bars for {', '.join(label(t, m) for t, m in frames)} from {label(base)}")
         total += n
     return total
+
+
+def exchange_of(store, source: str, ticker: str) -> str | None:
+    """The exchange a stock series is listed on (the watch row's MIC: its feed's, else any feed's);
+    what makes a listing abroad's days its own."""
+    rows = store.watchlist(ticker=ticker)
+    own = next((w.get("exchange") for w in rows if w["source"] == source), None)
+    return own or next((w.get("exchange") for w in rows if w.get("exchange")), None)
 
 
 def asset_of(store, source: str, ticker: str) -> str:

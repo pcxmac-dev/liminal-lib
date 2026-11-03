@@ -84,11 +84,16 @@ def initialize(store, feeds: list[str], exchanges=EXCHANGES, by: str = "value", 
     have = {(w["source"], w["ticker"]) for w in store.watchlist()}
     watched = {t for _, t in have}  # chosen one by one before: not bulk, whichever feeds it gets added to
     added, bulk = {}, set(load_bulk(store))
+    from .sources import providers
+    from .symbols import stock_spec
+
+    plugins = providers()
     for feed in feeds if stock_mics else ():
         new: dict[str, list[str]] = {}
+        p = plugins.get(feed)
         for r in ranked:
-            if (feed, r["ticker"]) not in have:
-                new.setdefault(r["exchange"], []).append(r["ticker"])
+            if (feed, r["ticker"]) not in have and (p is None or p.can_carry(stock_spec(r["ticker"], r["exchange"]))):
+                new.setdefault(r["exchange"], []).append(r["ticker"])  # a listing abroad goes to the feeds carrying it
         added[feed] = sum(len(t) for t in new.values())
         bulk |= {t for tickers in new.values() for t in tickers if t not in watched}
         if not dry_run:

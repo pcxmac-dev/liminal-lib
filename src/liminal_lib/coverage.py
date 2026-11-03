@@ -23,9 +23,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone  # noqa: F401
+from zoneinfo import ZoneInfo
 
 from . import freshness
 from .config import Tier
+from .models import exchange_timezone, is_foreign
 from .sessions import ET
 
 STEP_MS = {"minute": 60_000, "minute:5": 300_000, "hour": 3_600_000, "day": 86_400_000}
@@ -73,22 +75,26 @@ def day_start_ms(d: date) -> int:
     return ms(datetime.combine(d, time(0), ET))
 
 
-def frontier_ms(asset: str, tier: Tier, now: datetime, timespan: str) -> int:
+def frontier_ms(asset: str, tier: Tier, now: datetime, timespan: str, exchange: str | None = None) -> int:
     """End (exclusive) of what a plan has published by `now`: up to its newest expected bar; for
     day bars only days whose session is over (a day bar of a session still trading would change).
-    A real-time plan's newest minutes are left to settle first (freshness.settle)."""
+    A real-time plan's newest minutes are left to settle first (freshness.settle). A stock listed
+    outside the US (`exchange`): its days are the exchange's local calendar days, stamped at
+    midnight ET of the local date like any stock's."""
     now = now - freshness.settle(tier, asset)
-    exp = freshness.expected(asset, tier, now)
+    exp = freshness.expected(asset, tier, now, exchange)
     if exp.latest is None:
         return ms(now)
     if timespan == "day":
-        tz = timezone.utc if asset in UTC_DAY_ASSETS else ET
-        t = exp.latest.astimezone(tz)
-        start = datetime.combine(t.date(), time(0), tz)
+        stamp = timezone.utc if asset in UTC_DAY_ASSETS else ET  # the zone a day bar is stamped in
+        local = ZoneInfo(exchange_timezone(exchange)) if asset == "stock" and is_foreign(exchange) else stamp
+        t = exp.latest.astimezone(local)
+        start = datetime.combine(t.date(), time(0), stamp)
         after = exp.latest + timedelta(minutes=1)
         # over once its market closes, or once its last minute is in (a 24/7 asset's UTC day never
         # closes: its finished day waited for the next one's)
-        complete = after.astimezone(tz).date() > t.date() or not freshness.CALENDAR.is_open(asset, after)
+        complete = after.astimezone(local).date() > t.date() or \
+            not freshness.CALENDAR.is_open(asset, after, exchange=exchange)
         return ms(start + timedelta(days=1)) if complete else ms(start)
     step = STEP_MS.get(timespan, 60_000)
     if step > 60_000:  # a coarser frame (5 minutes, an hour): only its bars that are complete
@@ -127,14 +133,15 @@ def eras_ahead(eras: list[tuple[int, int, list[str]]], peer: str, me: str) -> li
     return [(a, b) for a, b, order in eras if peer in order and me in order and order.index(peer) < order.index(me)]
 
 
-def has_open_time(asset: str, a: int, b: int) -> bool:
+def has_open_time(asset: str, a: int, b: int, exchange: str | None = None) -> bool:
     """Whether the market trades at all in [a, b): a span of nights, weekends and holidays needs
-    no request."""
+    no request (a stock listed outside the US: its exchange's days, by `exchange`)."""
     if asset == "crypto":
         return b > a
     lo = datetime.fromtimestamp(a / 1000, ET)
     hi = datetime.fromtimestamp(b / 1000, ET)
-    for s in freshness.CALENDAR.sessions(asset, lo.date() - timedelta(days=1), hi.date() + timedelta(days=1)):
+    for s in freshness.CALENDAR.sessions(asset, lo.date() - timedelta(days=1), hi.date() + timedelta(days=1),
+                                         exchange=exchange):
         if s.open < hi and s.close > lo:
             return True
     return False
@@ -162,12 +169,13 @@ def rank(profile: FeedProfile, resolution: str, scores: dict, quality: float = 1
 
 
 def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str, timespan: str,
-         floor: date, now: datetime, listed_from: date | None = None) -> list[tuple[int, int]]:
-    """The spans `me` should download for a series now, oldest first."""
+         floor: date, now: datetime, listed_from: date | None = None, exchange: str | None = None) -> list[tuple[int, int]]:
+    """The spans `me` should download for a series now, oldest first (`exchange`: the MIC of a
+    listing outside the US, whose days are its own)."""
     from .collector import history_floor
 
     today = now.astimezone(ET).date()
-    lo, hi = day_start_ms(floor), frontier_ms(freshness.hours(me.name, asset), me.tier, now, timespan)
+    lo, hi = day_start_ms(floor), frontier_ms(freshness.hours(me.name, asset), me.tier, now, timespan, exchange)
     gaps = [(lo, hi)] if lo < hi else []
     # Held: what a feed of the same market sent. Bars built here from ticks do not count: the
     # feed's own bars replace them when they arrive (received over derived).
@@ -213,7 +221,7 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
             p_floor = history_floor(peer.tier, today, asset)
             if listed_from:
                 p_floor = max(p_floor, listed_from)
-            edge = frontier_ms(freshness.hours(peer.name, asset), peer.tier, now, timespan)
+            edge = frontier_ms(freshness.hours(peer.name, asset), peer.tier, now, timespan, exchange)
             window = intersect([(day_start_ms(p_floor), edge)], ahead)
             gaps = subtract(gaps, subtract(window, empty(peer.name)))
     step = STEP_MS.get(timespan, 60_000)

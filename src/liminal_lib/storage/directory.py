@@ -136,17 +136,27 @@ class DirectoryStore:
         cols = ["source", "ticker", "kind", "day", "event", "detail"]
         return [dict(zip(cols, r)) for r in self.conn.execute(sql + " ORDER BY day DESC, ticker LIMIT ?", [*args, limit])]
 
-    def directory(self, source: str = "massive", kind: str | None = None) -> list[dict]:
+    def directory(self, source: str | None = None, kind: str | None = None) -> list[dict]:
+        """The active listings of one source, or of every source (a market abroad is listed by its
+        own feed: TWSE's, B3's); a listing two sources both carry is one row, the one with the
+        snapshot's prices, or an icon, before the others."""
         sql = """SELECT d.ticker, d.kind, d.name, d.exchange, d.type, s.close, s.volume, s.vwap,
-                        i.data IS NOT NULL AS has_icon
+                        i.data IS NOT NULL AS has_icon, d.source
                  FROM directory d
                  LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker AND d.kind='stock'
                       AND s.day=(SELECT MAX(day) FROM market_snapshot WHERE source=d.source)
                  LEFT JOIN icons i ON i.source=d.source AND i.ticker=d.ticker
-                 WHERE d.source=? AND d.retired_on IS NULL""" + (" AND d.kind=?" if kind else "") + " ORDER BY d.ticker"
+                 WHERE d.retired_on IS NULL""" + (" AND d.source=?" if source else "") + (" AND d.kind=?" if kind else "")
         # (the snapshot is the stocks' whole-market file: a futures root sharing a stock's ticker, BZ, is not that stock)
-        cols = ["ticker", "kind", "name", "exchange", "type", "close", "volume", "vwap", "icon"]
-        return [dict(zip(cols, r)) for r in self.conn.execute(sql, [source] + ([kind] if kind else []))]
+        cols = ["ticker", "kind", "name", "exchange", "type", "close", "volume", "vwap", "icon", "source"]
+        args = ([source] if source else []) + ([kind] if kind else [])
+        best: dict[tuple, dict] = {}
+        for r in self.conn.execute(sql + " ORDER BY d.ticker, d.source", args):
+            row = dict(zip(cols, r))
+            key, fuller = (row["ticker"], row["kind"]), (row["close"] is not None, bool(row["icon"]))
+            if key not in best or fuller > (best[key]["close"] is not None, bool(best[key]["icon"])):
+                best[key] = row
+        return [{k: v for k, v in row.items() if k != "source"} for row in best.values()]
 
     def company_profiles(self, source: str = "massive") -> dict[str, dict]:
         """{ticker: {sic_code, sic_description, market_cap}} from stored reference records (one

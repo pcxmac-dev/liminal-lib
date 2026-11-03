@@ -116,10 +116,12 @@ def spikes(bars: pd.DataFrame, parts: np.ndarray | None = None, side: int = SPIK
     return caught, [found[i] for i in np.flatnonzero(caught)]
 
 
-def _parts(ts: np.ndarray, timespan: str, asset: str) -> np.ndarray:
+def _parts(ts: np.ndarray, timespan: str, asset: str, exchange: str | None = None) -> np.ndarray:
     """The part of the session of each bar: US stocks and indices regular hours or not (intraday);
-    one part otherwise."""
-    if timespan == "day" or asset not in ("stock", "index"):
+    one part otherwise (a stock listed outside the US too: its hours are not New York's)."""
+    from .models import is_foreign
+
+    if timespan == "day" or asset not in ("stock", "index") or is_foreign(exchange):
         return np.full(len(ts), "all", dtype=object)
     from .sessions import regular_mask
 
@@ -155,7 +157,7 @@ def _ends(ts: np.ndarray, timespan: str, asset: str) -> np.ndarray:
 
 
 def inconsistent(store, source: str, ticker: str, timespan: str, lo_ms: int, hi_ms: int,
-                 asset: str = "stock") -> tuple[pd.DataFrame, list[dict]]:
+                 asset: str = "stock", exchange: str | None = None) -> tuple[pd.DataFrame, list[dict]]:
     """Rule 3: a feed's own bars in [lo, hi) whose high or low lies beyond its own finer bars' (a
     day's minutes, a minute's seconds) by more than CONSISTENT: the extreme is in no trade the feed
     shows at the finer frame. Judged only where the feed holds that finer frame for the whole bar
@@ -163,9 +165,12 @@ def inconsistent(store, source: str, ticker: str, timespan: str, lo_ms: int, hi_
     Read a chunk of the finer frame at a time (CHUNK_MS), and only where the feed holds it: the
     check of a first minute backfill (twenty years, 4-5 million rows) read it all at once, 1-2 GB.
     Returns (the bars, evidence)."""
+    from .models import is_foreign
+
     finer = FINER.get(timespan)
     empty = pd.DataFrame(), []
-    if finer is None or asset == "future":  # futures' days are CME sessions from 18:00: not a date's minutes
+    # futures' days are CME sessions from 18:00, a listing abroad's its local day: not a New York date's minutes
+    if finer is None or asset == "future" or (asset == "stock" and is_foreign(exchange)):
         return empty
     spans = sorted(store.coverage(ticker, finer, source=source).get(source, []))
     if not spans:  # nothing to judge by: the bars are not read
@@ -222,7 +227,7 @@ def _inconsistent(store, source: str, ticker: str, timespan: str, lo_ms: int, hi
 
 
 def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "stock", lo_ms: int | None = None,
-                hi_ms: int | None = None, now_ms: int | None = None) -> int:
+                hi_ms: int | None = None, now_ms: int | None = None, exchange: str | None = None) -> int:
     """Judge one series' bars in [lo, hi) (all of them by default) by rules 1 and 2 and put what they
     catch on the feed's pruned list; derive rebuilds the frames above what was pruned. Returns
     entries added."""
@@ -249,7 +254,7 @@ def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "st
                 dirty.append((int(ts[hit].min()), int(ts[hit].max()) + STEP_MS[timespan]))
             ok = ~broken  # a malformed bar is no one's neighbour
             sub = rows[ok].reset_index(drop=True)
-            caught, evidence = spikes(sub, _parts(sub["ts"].to_numpy(dtype="int64"), timespan, asset),
+            caught, evidence = spikes(sub, _parts(sub["ts"].to_numpy(dtype="int64"), timespan, asset, exchange),
                                       judge=judge[ok])
             hit = np.flatnonzero(caught)
             if len(hit):
@@ -260,7 +265,7 @@ def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "st
                 added += store.prune(source, ticker, timespan, 1, sub.iloc[hit], "spike", True, evidence)
                 t = sub["ts"].to_numpy(dtype="int64")[hit]
                 dirty.append((int(t.min()), int(t.max()) + STEP_MS[timespan]))
-        bad, evidence = inconsistent(store, source, ticker, timespan, start, end, asset)
+        bad, evidence = inconsistent(store, source, ticker, timespan, start, end, asset, exchange)
         if len(bad):
             added += store.prune(source, ticker, timespan, 1, bad, "inconsistent", True, evidence)
             t = bad["ts"].to_numpy(dtype="int64")
@@ -273,7 +278,7 @@ def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "st
     return added
 
 
-def scan_symbol(store, source: str, ticker: str, asset: str = "stock") -> int:
+def scan_symbol(store, source: str, ticker: str, asset: str = "stock", exchange: str | None = None) -> int:
     """Judge what changed in a series since its last scan (each base frame it holds). Returns entries added."""
     added = 0
     for timespan in BASES:
@@ -291,7 +296,7 @@ def scan_symbol(store, source: str, ticker: str, asset: str = "stock") -> int:
                 continue
             lo, hi = span[0], span[1] + STEP_MS[timespan]
         # the bars just before the change are judged again: their right-hand neighbours came with it
-        added += scan_series(store, source, ticker, timespan, asset, lo - MARGIN_MS[timespan], hi)
+        added += scan_series(store, source, ticker, timespan, asset, lo - MARGIN_MS[timespan], hi, exchange=exchange)
         store.kv_set(key, str(started - SLACK_MS))
     return added
 

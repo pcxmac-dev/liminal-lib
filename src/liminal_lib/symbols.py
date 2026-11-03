@@ -1,6 +1,7 @@
 """Turn what the user types into a precise instrument spec.
 
     SPCX, SPCX::NASDAQ, NASDAQ:SPCX     stock (optionally pinned to an exchange)
+    7203.T, TSE:7203, 7203::XTKS        stock listed outside the US: stored as TICKER.SUFFIX (models.VENUES)
     IXIC, SPX, RUT, DJI, NDX, I:SPX, ^GSPC   index
     EURUSD, USDEUR, EUR/USD, C:EURUSD, FX:EURUSD   forex pair
     BTCUSD, BTC/USD, BTC-USD, X:BTCUSD, COINBASE:BTCUSD   crypto pair (consolidated across exchanges)
@@ -14,7 +15,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .models import exchange_mic
+from .models import exchange_mic, is_foreign, listing_ticker, suffix_mic
 
 ASSETS = ("stock", "index", "fx", "crypto", "future")
 
@@ -73,6 +74,22 @@ def _crypto(text: str) -> SymbolSpec | None:
     return None
 
 
+def stock_spec(ticker: str, exchange: str | None = None) -> SymbolSpec:
+    """A stock's spec from its ticker and an optional exchange pin. A listing outside the US is
+    stored as TICKER.SUFFIX (7203.T on XTKS, VOD.L on XLON: models.VENUES) whichever way it was
+    typed (7203.T, TSE:7203, 7203::XTKS); a US ticker stays bare with its pin apart (SPCX::NASDAQ:
+    SPCX on XNAS). An explicit pin wins over a suffix; a dot before what is no suffix is a share
+    class (BRK.B)."""
+    t = ticker.strip().upper()
+    base, dot, tail = t.rpartition(".")
+    by_suffix = suffix_mic(tail) if base and dot else None
+    if exchange is None:
+        exchange = by_suffix
+    elif is_foreign(exchange):
+        t = listing_ticker(base if by_suffix else t, exchange)
+    return SymbolSpec(t, "stock", t, exchange)
+
+
 def resolve(text: str) -> SymbolSpec:
     raw = text.strip()
     t = raw.upper()
@@ -104,8 +121,8 @@ def resolve(text: str) -> SymbolSpec:
 
     if "::" in raw:
         ticker, exch = raw.split("::", 1)
-        return SymbolSpec(ticker.strip().upper(), "stock", ticker.strip().upper(), exchange_mic(exch))
+        return stock_spec(ticker, exchange_mic(exch))
     if ":" in raw:
         exch, ticker = raw.split(":", 1)
-        return SymbolSpec(ticker.strip().upper(), "stock", ticker.strip().upper(), exchange_mic(exch))
-    return SymbolSpec(t, "stock", t)
+        return stock_spec(ticker, exchange_mic(exch))
+    return stock_spec(t)

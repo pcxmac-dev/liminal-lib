@@ -123,6 +123,18 @@ class WatchlistStore:
         return {(s, a or "stock"): n for s, a, n in self.conn.execute(
             "SELECT source, asset, COUNT(*) FROM watchlist WHERE closed_at IS NULL GROUP BY source, asset")}
 
+    def watch_exchanges(self) -> dict[str, set[str]]:
+        """{feed: {MIC}}: the exchanges outside the US its open stock rows are listed on (their days
+        are their own: the fetcher's next due moment, freshness.expected per exchange)."""
+        from ..models import is_foreign
+
+        out: dict[str, set[str]] = {}
+        for s, x in self.conn.execute("SELECT DISTINCT source, exchange FROM watchlist WHERE closed_at IS NULL "
+                                      "AND (asset IS NULL OR asset='stock') AND exchange IS NOT NULL"):
+            if is_foreign(x):
+                out.setdefault(s, set()).add(x)
+        return out
+
     def watchlist(self, source: str | None = None, ticker: str | None = None) -> list[dict]:
         """Watchlist entries, of one feed and/or one ticker (`ticker` reads by index: with thousands
         of symbols, per-symbol code asks for its own rows rather than scanning them all)."""

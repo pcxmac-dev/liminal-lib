@@ -70,8 +70,11 @@ class DataSource(ABC):
         descending: bool = False, asset: str = "stock",
     ) -> Iterator[list[dict]]:
         """OHLCV bars in one shape for every asset class: t (ms bar start; for "day" bars
-        midnight US/Eastern of the trading/settlement date), o, h, l, c, v, vw, n.
-        `start`/`end` are whole days (dates, inclusive) or exact times (datetimes)."""
+        midnight US/Eastern of the trading/settlement date, a listing outside the US included:
+        midnight ET of its local trading date, one bar a local trading day), o, h, l, c, v, vw, n.
+        `start`/`end` are whole days (dates, inclusive) or exact times (datetimes). A listing
+        outside the US comes as its stored name, TICKER.SUFFIX (models.VENUES): the source
+        strips its own suffix."""
 
     @abstractmethod
     def exchanges(self) -> list[Exchange]:
@@ -79,7 +82,9 @@ class DataSource(ABC):
 
     @abstractmethod
     def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
-        """Reference details for the instrument currently using a ticker.
+        """Reference details for the instrument currently using a ticker (`exchange` its
+        primary exchange's MIC, `list_date` its first trading day where the source knows it:
+        a market abroad's, by its own exchange; None otherwise).
 
         With resolve_exchange=False the primary exchange is not looked up, so the
         call costs as little as possible (used by the scheduled listing check).
@@ -104,7 +109,9 @@ class DataSource(ABC):
         raise NotImplementedError(f"{self.name} has no news")
 
     def listings(self, exchange: str) -> list[dict]:
-        """Every active listing on an exchange (MIC): dicts with ticker, name, exchange, type, figi."""
+        """Every active listing on an exchange (MIC): dicts with ticker, name, exchange, type, figi.
+        A listing outside the US under its stored name, TICKER.SUFFIX, or its bare code: the
+        collector's refresh_directory puts the exchange's suffix on (models.listing_ticker)."""
         raise NotImplementedError(f"{self.name} has no listings directory")
 
     def futures_products(self, day=None) -> list[dict]:

@@ -33,6 +33,7 @@ import numpy as np
 from . import freshness
 from .coverage import STEP_MS, FeedProfile, day_start_ms, frontier_ms, has_open_time, ms
 from .errors import NotEntitled, SourceError
+from .models import is_foreign
 from .sessions import ET
 
 # Margin of error per bar: a price within max(PRICE_BPS of price, one cent) of the other feed's,
@@ -242,8 +243,8 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
         if done >= queued or spent():
             break
         w = mine.get(q["ticker"])
-        if w is None or not source.serves(w["asset"]):
-            continue
+        if w is None or not source.serves(w["asset"]) or is_foreign(w.get("exchange")):
+            continue  # (a listing abroad has no copy of its market here to audit it by)
         from .coverage import same_market
 
         if not same_market(feeds, q["owner"], me.name, w["asset"]):
@@ -276,7 +277,7 @@ def random_span(store, source, me: FeedProfile, now: datetime, rng: random.Rando
     mine = mine or {w["ticker"]: w for w in store.watchlist(source.name)}
     candidates = []
     for ticker, w in mine.items():
-        if w["asset"] == "future" or not source.serves(w["asset"]):
+        if w["asset"] == "future" or not source.serves(w["asset"]) or is_foreign(w.get("exchange")):
             continue
         lo, hi = _window(me, w["asset"], "minute", now)
         for owner, spans in store.coverage(ticker, "minute").items():

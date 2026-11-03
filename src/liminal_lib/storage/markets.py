@@ -203,9 +203,12 @@ def mic_names(exchanges: pd.DataFrame) -> dict[str, str]:
     """Each market identifier's name: its exchange's own. A tape shares its operator's MIC (Massive lists
     the Consolidated Tape Association under XNYS and the Unlisted Trading Privileges plan under XNAS),
     and was shown for every NYSE stock (the user, 2026-10-31: "is this the right corp name ?"), so an
-    entry of type exchange comes first; among those, the first source's (alphabetical)."""
+    entry of type exchange comes first; among those, the first source's (alphabetical). The exchanges
+    the app knows by name (models.VENUES: a listing abroad before its feed's rows arrive) come last."""
+    from ..models import VENUES
+
     best: dict[str, tuple] = {}
     for r in exchanges.itertuples():
         if r.mic and (r.mic not in best or (r.type == "exchange" and best[r.mic][1] != "exchange")):
             best[r.mic] = (r.name, r.type)
-    return {mic: name for mic, (name, _) in best.items()}
+    return {**{v.mic: v.name for v in VENUES}, **{mic: name for mic, (name, _) in best.items()}}

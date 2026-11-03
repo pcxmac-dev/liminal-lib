@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 from .. import layout
 from ..layout import MAIN, Database  # noqa: F401 - plugins import them from here
+from ..models import is_foreign
 from ..ratelimit import MachineLedger, RateLimiter  # plugins import MachineLedger from here (1.10)
 from .fetching import Fetched, FetchContext, Fetcher, Job  # noqa: F401 - plugins import them from here
 from .keys import KeyVar  # noqa: F401 - plugins import it from here
@@ -92,7 +93,10 @@ DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does n
 #   what the Tiingo plugin reached into the app for, so it could leave as a package.
 # 1.11 (2026-11-01): a plugin's own settings (Provider.settings -> Settings.plugins, Settings.plugin):
 #   Alpaca's keys, plan, feed, crypto venue and caps, once config.py's AlpacaSettings.
-PLUGIN_API = "1.11"
+# 1.12 (2026-11-02): Provider.exchanges, the exchanges outside the US whose stock listings a feed
+#   carries (models.VENUES: 7203.T on XTKS); without it, and without `carries`, a stock feed holds
+#   US listings only. The directory asks a feed's listings() for those exchanges too.
+PLUGIN_API = "1.12"
 
 
 def api_version(api) -> tuple[int, int]:
@@ -263,6 +267,9 @@ class Provider:
     serves: Callable[["Settings"], frozenset | None] | None = None
     markets: Callable[["Settings"], dict] | None = None
     carries: Callable[[object], bool] | None = None
+    # 1.12: the exchanges whose stock listings it carries (MICs of models.VENUES, "US" for every US
+    # listing); empty: US listings only
+    exchanges: frozenset = frozenset()
     plan_resolutions: Callable[["Tier", str], tuple[str, ...]] | None = None  # what its plan gives per asset
     reporter: Callable[["Report", "Settings | None"], "Report"] | None = None  # amends its standard report
     # Its capability scan (`capabilities`; on each chart app start, weekly in the sync, Rescan in the
@@ -324,8 +331,19 @@ class Provider:
         return self.markets(settings) if self.markets else {a: self.name for a in self.assets}
 
     def can_carry(self, spec) -> bool:
-        """Whether it can hold a symbol at all: its asset class, then its own list (`carries`)."""
-        return spec.asset in self.assets and (self.carries is None or bool(self.carries(spec)))
+        """Whether it can hold a symbol at all: its asset class, then its own list (`carries`) or,
+        for a stock, the exchanges it declares (1.12): none, the US alone (a stock feed from before);
+        some, exactly those, with "US" standing for every US listing (Tiingo: "US", XSHG, XSHE;
+        TWSE: XTAI)."""
+        if spec.asset not in self.assets:
+            return False
+        if self.carries is not None:
+            return bool(self.carries(spec))
+        if spec.asset != "stock":
+            return True
+        if not self.exchanges:
+            return not is_foreign(spec.exchange)
+        return spec.exchange in self.exchanges if is_foreign(spec.exchange) else "US" in self.exchanges
 
     def kind_for(self, asset: str) -> str:
         return self.kind_by_asset.get(asset) or self.kind

@@ -21,6 +21,7 @@ unscheduled ones the rules cannot know) and its CME futures schedules (per produ
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
@@ -28,6 +29,8 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+from .models import exchange_timezone, is_foreign
 
 ET = ZoneInfo("America/New_York")
 CT = ZoneInfo("America/Chicago")
@@ -165,7 +168,11 @@ class MarketCalendar:
         self.overrides = overrides or Overrides()
 
     # -- US equities -----------------------------------------------------------------
-    def is_trading_day(self, d: date) -> bool:
+    def is_trading_day(self, d: date, exchange: str | None = None) -> bool:
+        """A trading day of the US (the NYSE rules and the official overrides), or, with the MIC of
+        an exchange outside the US, of that exchange: every weekday, for now (local_day_session)."""
+        if is_foreign(exchange):
+            return d.weekday() < 5
         o = self.overrides.us.get(d)
         if o is not None:
             return o[0] != "closed"
@@ -263,14 +270,31 @@ class MarketCalendar:
         start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
         return [Session(d, start.astimezone(ET), (start + timedelta(days=1)).astimezone(ET))]
 
+    # -- stocks listed outside the US ------------------------------------------------------
+    @staticmethod
+    def local_day_session(exchange: str, d: date) -> Session | None:
+        """A stock listed outside the US (the user, 2026-11-02: stocks on foreign exchanges), the
+        least calendar that loses no day: every weekday a session covering the exchange's local
+        calendar day (models.exchange_timezone), its day bar stamped at midnight ET of that date
+        like any stock's. A holiday there is asked once and found empty, as a US holiday would be
+        before the official list. The seam for the exchange's own hours and holidays later
+        (world_calendar: exchange_calendars)."""
+        if d.weekday() >= 5:
+            return None
+        zone = ZoneInfo(exchange_timezone(exchange))
+        start = datetime.combine(d, time(0), zone)
+        return Session(d, start.astimezone(ET), (start + timedelta(days=1)).astimezone(ET))
+
     # -- any asset ---------------------------------------------------------------------
     def sessions(self, asset: str, start: date, end: date, product: str | None = None,
-                 extended: bool = True, overnight: bool = False) -> list[Session]:
+                 extended: bool = True, overnight: bool = False, exchange: str | None = None) -> list[Session]:
         """Sessions with session dates in [start, end], in order (US stocks: with `overnight`,
-        each from Blue Ocean's open the evening before). `asset` "overnight": Blue Ocean's nights
-        alone, 20:00 the evening before to 04:00 (its feed's own hours: freshness.FEED_HOURS)."""
+        each from Blue Ocean's open the evening before; a stock listed outside the US, by the MIC
+        in `exchange`: its local calendar days). `asset` "overnight": Blue Ocean's nights alone,
+        20:00 the evening before to 04:00 (its feed's own hours: freshness.FEED_HOURS)."""
         out: list[Session] = []
         d = start
+        abroad = asset == "stock" and is_foreign(exchange)
         while d <= end:
             if asset == "future":
                 out.extend(self.future_sessions(product, d))
@@ -281,6 +305,9 @@ class MarketCalendar:
             elif asset == "overnight":
                 if (opens := self.overnight_open(d)) is not None:
                     out.append(Session(d, opens, _et(d, time(4, 0))))
+            elif abroad:
+                if (s := self.local_day_session(exchange, d)) is not None:
+                    out.append(s)
             else:
                 s = self.stock_session(d, extended=extended, overnight=overnight and extended) if asset == "stock" \
                     else self._index_session(d)
@@ -294,15 +321,17 @@ class MarketCalendar:
         # The official closing value is published as a bar stamped at the close (16:00).
         return Session(d, reg[0], reg[1] + timedelta(minutes=1)) if reg else None
 
-    def is_open(self, asset: str, t: datetime, product: str | None = None) -> bool:
+    def is_open(self, asset: str, t: datetime, product: str | None = None, exchange: str | None = None) -> bool:
         t = t.astimezone(ET)
-        for s in self.sessions(asset, t.date() - timedelta(days=1), t.date() + timedelta(days=1), product):
+        for s in self.sessions(asset, t.date() - timedelta(days=1), t.date() + timedelta(days=1), product,
+                               exchange=exchange):
             if s.open <= t < s.close:
                 return True
         return False
 
     def open_minutes(self, asset: str, start: datetime, end: datetime, product: str | None = None,
-                     step_seconds: int = 60, extended: bool = True, overnight: bool = False) -> pd.DatetimeIndex:
+                     step_seconds: int = 60, extended: bool = True, overnight: bool = False,
+                     exchange: str | None = None) -> pd.DatetimeIndex:
         """Start of every `step_seconds` interval in [start, end) during which the market is open,
         as US/Eastern timestamps (what a feed with a bar for every open interval would hold)."""
         start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
@@ -310,7 +339,7 @@ class MarketCalendar:
         chunks = []
         for s in self.sessions(asset, (start - timedelta(days=2)).astimezone(ET).date(),
                                (end + timedelta(days=2)).astimezone(ET).date(), product, extended=extended,
-                               overnight=overnight):
+                               overnight=overnight, exchange=exchange):
             a, b = max(s.open, start), min(s.close, end)
             if a >= b:
                 continue
@@ -320,6 +349,31 @@ class MarketCalendar:
                 chunks.append(np.arange(a_ns, b_ns, step, dtype=np.int64))
         values = np.unique(np.concatenate(chunks)) if chunks else np.array([], dtype=np.int64)
         return pd.DatetimeIndex(values.astype("datetime64[ns]")).tz_localize("UTC").tz_convert(ET)
+
+
+# -- the exchanges' own calendars ---------------------------------------------------------
+_world_calendars: dict[str, object] = {}
+_world_lock = threading.Lock()
+
+
+def world_calendar(name: str):
+    """An exchange's own calendar (exchange_calendars, by MIC: XTKS, XLON), built once: from 30 days
+    back to 400 days on, or what is recorded when an exchange publishes next year's holidays late
+    (China, Singapore, India). The Markets globe reads these (the app's gui/world.py); the sessions
+    of a listing outside the US will (local_day_session's seam)."""
+    import exchange_calendars as xc
+
+    with _world_lock:
+        cal = _world_calendars.get(name)
+        if cal is None:
+            today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+            start, end = today - pd.Timedelta(days=30), today + pd.Timedelta(days=400)
+            try:
+                cal = xc.get_calendar(name, start=start, end=end)
+            except Exception:
+                cal = xc.get_calendar(name, start=start)
+            _world_calendars[name] = cal
+        return cal
 
 
 # -- official schedules from the store ----------------------------------------------------
