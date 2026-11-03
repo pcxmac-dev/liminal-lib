@@ -83,6 +83,11 @@ for _tier in ("twse", "tpex", "b3", "alphavantage-free", "jquants-light", "jquan
 PLAN_DELAYS["jquants-free"] = {"stock": Delay("eod", timedelta(weeks=12))}
 PLAN_DELAYS["twelvedata-free"] = {"fx": Delay("utc_day")}
 
+# Cboe's VIX futures files (liminal-plugin-cboe's cboefutures feed): a contract's day comes with its
+# settlement after the session, so its day bars are expected once the session is over, like a
+# stock's on an end-of-day plan (the futures session dates: CME's, 18:00 to 17:00 ET).
+PLAN_DELAYS["cboe-futures"] = {"future": Delay("eod")}
+
 # A feed whose market keeps hours of its own: Blue Ocean (sources/plugins/alpaca.py, BOATS) trades US stocks
 # overnight only, 20:00-04:00 ET (MarketCalendar's "overnight"). Judged by the stock day, its nights
 # looked closed: it was asked only up to 20:00, so a night's bars came the next morning, and a stock
@@ -247,7 +252,7 @@ def expected(asset: str, tier: Tier, now: datetime, exchange: str | None = None)
     the US, `exchange` (its MIC) gives the days (sessions.local_day_session)."""
     now = now.astimezone(ET)
     delay = plan_delay(tier, asset)
-    if delay.kind == "eod" and asset in ("stock", "index"):
+    if delay.kind == "eod" and asset in ("stock", "index", "future"):
         cut = now - delay.lag  # a plan publishing its days late (J-Quants' free plan): the day that far back
         s = cut.date() if is_trading_day(cut.date(), exchange) else previous_session(cut.date(), exchange)
         while _eod_ready(s) > cut:
@@ -286,7 +291,7 @@ def assess(asset: str, tier: Tier, last_bar: datetime | None, now: datetime, exc
     if exp.latest is None:
         return out | {"state": "current"}
     last_bar = last_bar.astimezone(ET)
-    if plan_delay(tier, asset).kind == "eod" and asset in ("stock", "index"):
+    if plan_delay(tier, asset).kind == "eod" and asset in ("stock", "index", "future"):
         behind = last_bar.date() < exp.latest.date()
     else:
         behind = last_bar < exp.latest - GRACE

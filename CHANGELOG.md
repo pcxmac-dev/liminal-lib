@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.2 (2026-11-03)
+
+Found going through the fetcher's page plugin by plugin (the user: "go through the UI and look for discrepancies"):
+a feed of daily bars alone (TWSE's, B3's, J-Quants', Alpha Vantage's, Cboe's) no longer lists a trades database it
+can never have (`plugin_databases`: the -ticks.db file only where a feed provides 1-second bars or streams trades);
+Cboe's VIX futures feed publishes a contract's day with its settlement after the session (`PLAN_DELAYS["cboe-futures"]`,
+end of day; `expected` and `assess` take an end-of-day plan's futures like its stocks), where the Plugins view said
+"480 min delayed", the free futures plans' rule.
+
 ## 1.2.1 (2026-11-02)
 
 A listing outside the US whose source names another exchange keeps its exchange and still takes the record's

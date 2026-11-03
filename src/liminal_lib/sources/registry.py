@@ -878,8 +878,10 @@ def plugin_fetchers() -> dict[str, list[tuple[str, Fetcher]]]:
 
 def plugin_databases(name: str) -> list[Database]:
     """Every database a plugin's data is in (API 1.8; layout.py), each once (what it holds of the
-    plugin's together), in this order: each feed's bars and trades (feeds/<feed>.db, -ticks.db; its
-    live feeds' too: Alpaca's iex), its datasets' files and their downloads (datasets/<file>.db,
+    plugin's together), in this order: each feed's bars (feeds/<feed>.db) and, where it can have
+    trades (1-second bars among what it provides, or a stream of its own), its trades (-ticks.db; a
+    feed of daily bars alone, TWSE's, has no trades file), its live feeds' too (Alpaca's iex: a
+    stream's trades), its datasets' files and their downloads (datasets/<file>.db,
     sources/datasets/<file>/), what its publishers read (gov/gov.db), the databases its own code
     writes (`databases`), and its rows in the main file. A feed plugin's include its feeds' and
     publishers' (Massive: its headlines); a publisher's, its parts' (Federal: its agencies'); a part's,
@@ -891,11 +893,15 @@ def plugin_databases(name: str) -> list[Database]:
     if name in ps:
         for n in plugin_feeds(name) if plugin_of(name) == name else [name]:
             f = ps[n]
-            for feed, called in ((n, label(n)), *((x.name, x.label or x.name) for x in f.live if x.name != n)):
+            ticks = not f.provides or any("second" in r for r in f.provides.values()) \
+                or any(x.stream is not None for x in f.live)
+            for feed, called, trades in ((n, label(n), ticks),
+                                         *((x.name, x.label or x.name, x.stream is not None) for x in f.live if x.name != n)):
                 found += [Database(layout.bars(feed), f"{called}: bars"),
                           Database(layout.history(feed), f"{called}: closed months' bars, a DuckDB file a month (when "
-                                   "its bars store is DuckDB)", engine="duckdb"),
-                          Database(layout.ticks(feed), f"{called}: trades")]
+                                   "its bars store is DuckDB)", engine="duckdb")]
+                if trades:
+                    found.append(Database(layout.ticks(feed), f"{called}: trades"))
             declared += f.databases
         main.append("its rows by feed: requests a day, events, the reference it gave")
         parts = publisher_parts(name) if plugin_of(name) == name else []
