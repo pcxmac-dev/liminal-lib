@@ -8,7 +8,7 @@ group `liminal.providers` (pointing at the module, or at the Provider itself); a
 What a plugin gives:
 - `build(settings, request_budget)`: its DataSource (sources/base.py), with its limiter and caps.
 - its keys (`KeyVar`: user environment variables; never written to a file), and how to get one
-  (`signup`): tools/set-key.ps1 offers each plugin's keys from `python -m liminal plugins --json`.
+  (`signup`): tools/set-key.ps1 offers each plugin's keys from `liminal plugins --json`.
 - what it serves: asset classes (`assets`; `keyless` the ones it serves without keys), the market
   each is (`markets`), whether it carries a symbol (`carries`), and whether it is a closed archive.
 - its plan, rate window and caps (`view`, `rate`), and what its server publishes (`limits`).

@@ -45,7 +45,7 @@ class Store(ProvenanceStore, AdminStore, FeedStore, PrunedStore, DatasetStore, D
         if old:
             self.conn.close()
             raise OldLayout(f"{self.path} still holds every feed's data in one place ({', '.join(old)}): "
-                            "run `python -m liminal admin split-feeds` to move each feed to its own "
+                            "run `liminal admin split-feeds` to move each feed to its own "
                             "files (it backs up first)")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA journal_size_limit=67108864")  # cut back to 64 MB once checkpointed

@@ -372,7 +372,7 @@ class OwnProbe:
 
     def processes(self) -> list[Proc]:
         t = os.times()
-        return [Proc(os.getpid(), os.getppid(), " ".join(["python", "-m", "liminal", *sys.argv[1:]]),
+        return [Proc(os.getpid(), os.getppid(), " ".join(["liminal", *sys.argv[1:]]),
                      _STARTED, t.user + t.system, 0, 0, 0, 0, threading.active_count(), 0)]
 
     def machine(self) -> Machine | None:

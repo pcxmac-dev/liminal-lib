@@ -15,13 +15,14 @@ def test_every_module_imports_without_the_app():
     assert len(names) > 40
     for name in names:
         importlib.import_module(name)
-    # the library reaches into no program of Liminal's (a plugin installed beside it may still import
-    # the app's package for the contract, under its old name, until it points here)
-    assert "liminal.gui" not in sys.modules and "liminal.cli" not in sys.modules
+    # the library reaches into no program of Liminal's: not the app (liminal_app, once liminal), not
+    # the integrator; plugins import the library as liminal_lib (2026-11-02)
+    for program in ("liminal_app", "liminal_integrator", "liminal.gui", "liminal.cli"):
+        assert program not in sys.modules
 
 
 def test_the_version_and_the_thread_setting():
     import os
 
-    assert liminal_lib.__version__ == "1.0.1"
+    assert liminal_lib.__version__ == "1.1.0"
     assert os.environ.get("OPENBLAS_NUM_THREADS") == "1"  # set before numpy loads, by the library

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0 (2026-11-02)
+
+The app is liminal-app (the user: "lets rename the app to liminal-app", "not liminal", "refactor"): hosts start as
+`python -m liminal_app host NAME` (`host.APP_MODULE`), messages name the `liminal` command (the app's console
+script) instead of `python -m liminal`, and the library's import test refuses the app and the integrator under
+their new names. Plugins import the library as `liminal_lib` from their next releases.
+
 ## 1.0.1 (2026-11-02)
 
 The workspace (`layout.py`: `home`, `data_dir`, `plugins_dir`): `common/` the library, `app/` the chart app,

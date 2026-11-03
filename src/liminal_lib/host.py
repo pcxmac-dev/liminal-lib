@@ -316,14 +316,17 @@ def attach(name: str, db_path: Path, start: Callable[[], None] | None = None, wa
     return Attachment(name, db_path, conn, int(answer.get("pid") or 0))
 
 
+APP_MODULE = "liminal_app"  # the app's package: `python -m liminal_app host NAME` runs a host (its cli, cmd_host)
+
+
 def start_host(name: str, db_path: Path) -> None:
     """Start the host `name` as a process of its own: no window, outliving this process, on this
-    database (LIMINAL_DB in its environment)."""
+    database (LIMINAL_DB in its environment). The hosts' code is the app's (APP_MODULE)."""
     exe = Path(sys.executable)
     pythonw = exe.with_name("pythonw.exe") if os.name == "nt" and exe.with_name("pythonw.exe").exists() else exe
     flags = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0  # DETACHED | NEW_GROUP | NO_WINDOW
     env = {**os.environ, "LIMINAL_DB": str(db_path)}
-    subprocess.Popen([str(pythonw), "-m", "liminal", "host", name], creationflags=flags, close_fds=True, env=env,
+    subprocess.Popen([str(pythonw), "-m", APP_MODULE, "host", name], creationflags=flags, close_fds=True, env=env,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

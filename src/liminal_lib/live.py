@@ -966,7 +966,7 @@ def reap_strays(log=print, others=None, terminate=None) -> int:
 # The recorder runs as the host `live`: started by the first client to attach (the chart app, while
 # a chart has a symbol open: gui/server.py note_open), gone once the last client has detached for
 # the idle time, its trades flushed first (the user, 2026-11-01: no processes or open databases when
-# the app is not in use). `python -m liminal host live` runs it; `python -m liminal live` runs one
+# the app is not in use). `liminal host live` runs it; `liminal live` runs one
 # in the foreground, a client of nobody, until Ctrl+C.
 HOST = "live"
 

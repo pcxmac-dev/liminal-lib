@@ -174,7 +174,7 @@ def _fail(data_dir: Path):
 
 
 # -- the keeper: a resident host (host.py) -----------------------------------------------------
-# The server runs under a keeper, `python -m liminal host mongo`: a process whose documents live
+# The server runs under a keeper, `liminal host mongo`: a process whose documents live
 # in MongoDB attaches to the keeper (attach, once for the process's life, or until detach), the
 # keeper starts the server for its first client, and shuts it down cleanly once its last client
 # has been gone for the idle time (the user, 2026-11-01: "attached software like duckdb or what
@@ -210,7 +210,7 @@ def attach(data_dir: Path, log=print) -> bool:
             if _attachment is None:
                 if running():
                     return True  # the keeper did not come up, the server answers all the same: used
-                raise RuntimeError("MongoDB's keeper did not answer (python -m liminal host mongo)")
+                raise RuntimeError("MongoDB's keeper did not answer (liminal host mongo)")
     return _answers(START_WAIT_S)
 
 

@@ -202,7 +202,7 @@ def settle(store, gov_conn, data_dir: Path, log: Callable[[str], None] = lambda 
 
                 mongo.ensure(data_dir)
                 if not mongo.alive(0):
-                    raise RuntimeError("the MongoDB server is not running (python -m liminal mongo start)")
+                    raise RuntimeError("the MongoDB server is not running (liminal mongo start)")
             moved = 0
             for kind, where in scopes:
                 dst = backend(want, kind, store.conn, gov_conn, data_dir, start=True)

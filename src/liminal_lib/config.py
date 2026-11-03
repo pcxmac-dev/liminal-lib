@@ -34,7 +34,7 @@ Public historical sources (closed feeds: they fill history nobody else holds, th
 again): Bitstamp, Coinbase and Bitfinex (crypto bars) and Cboe (index daily history), each its own
 package (liminal-plugin-<name>: pip install -e ".[plugins]"), need nothing; Tiingo (US stock daily
 bars from 1962, its forex; liminal-plugin-tiingo) a free account key, TIINGO_API_KEY (environment
-only; each plugin's keys: `python -m liminal plugins`);
+only; each plugin's keys: `liminal plugins`);
     CRYPTO_VENUE_DAYS limit the crypto exchange feeds (Coinbase, Bitfinex) to this many days of history
                       (default: 0, everything they hold: Coinbase from 2015, Bitfinex from 2013)
 

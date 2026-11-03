@@ -23,8 +23,7 @@ current session is the live streams' (live.py), shown apart.
   exchanges, not on bad copies.
 
 The fetcher follows it (coverage.plan): in an era the first source downloads and the others stand
-back, unless it does not watch the symbol or found nothing there. `python -m liminal
-sourcing` shows it.
+back, unless it does not watch the symbol or found nothing there. `liminal sourcing` shows it.
 """
 from __future__ import annotations
 
