@@ -64,7 +64,7 @@ def same_market(feeds: dict, a: str, b: str, asset: str) -> bool:
     pa, pb = feeds.get(a), feeds.get(b)
     va = pa.venues.get(asset, "") if pa else ""
     vb = pb.venues.get(asset, "") if pb else ""
-    return bool(va) and va == vb  # neither having a market for it is not the same market
+    return va == vb  # two feeds naming no market for it count as one (the collector's fakes): ask with the right class
 
 
 def ms(t: datetime) -> int:

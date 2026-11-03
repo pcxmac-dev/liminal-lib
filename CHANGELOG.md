@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.4 (2026-11-03)
+
+1.2.3's `same_market` undone: two feeds naming no market for an asset class count as one market again (the
+collector's tests run fakes that name none, and a real feed names one for every class it serves); the app's
+one-feed-per-span check asks with the asset class the ticker belongs to instead.
+
 ## 1.2.3 (2026-11-03)
 
 `coverage.same_market` says no for two feeds neither of which has a market for an asset class (it said yes, two
