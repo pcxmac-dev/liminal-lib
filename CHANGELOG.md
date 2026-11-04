@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.1 (2026-11-03)
+
+The class contract's conformance check, `sources/conformance.py` (the user: "evaluate each functional
+piece of software or plugin and verify correctness and valid functionality through unit tests created to
+address new class scheme"): `problems(plugin)` lists every way a plugin falls short of the contract, read
+from the plugin alone (its name, title, contract version, system and kind, keys and variables, hooks,
+`with_()`, and what its kind declares: a feed's assets, resolutions, delays and hours; a publisher's feeds
+and datasets; an assistant's plans, models, prices, sources and caps); `assert_conforms`,
+`assert_module_conforms` and `plugins_of` for the tests: every plugin package's tests/test_contract.py,
+and the charts app's test over every plugin found.
+
 ## 1.4.0 (2026-11-03)
 
 Renamed `liminal-libs` (the package `liminal_libs`): the naming by system (the user, 2026-11-03: apps are
