@@ -4,6 +4,7 @@ PublisherPlugin subclass, what it declares class attributes, what it does method
 the settings, the readers and the freshness rules ask both the same way."""
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
@@ -318,3 +319,42 @@ def test_a_public_feed_and_a_crypto_venue_as_classes(installed, settings_for):
     assert coin.settings_view(settings).tier.history_days is None
     with pytest.raises(NotImplementedError, match="no source_class"):
         PublicFeedPlugin(name="bare").build(settings, 1)
+
+
+def test_a_process_loads_every_plugin_found_the_ones_named_or_none(installed, monkeypatch):
+    """The user, 2026-11-03: "the default case is to load all plugins, however the integrator can be
+    loaded with select plugins or none". LIMINAL_PLUGINS_LOADED (registry.select) names the plugins
+    kept, each with its parts (a part's name keeps its whole plugin); `none` keeps none; the plugins
+    found but not named are left out quietly, a name no plugin answers to is unknown; a process
+    started by this one inherits the selection (its environment)."""
+    class AcmeForex(AcmeFeed):
+        name = "acme-fx"
+        part_of = "acme"
+        assets = frozenset({"forex"})
+        keyless = frozenset()
+        provides = {"forex": ("day",)}
+        delays = {}
+        hours = {}
+
+    class AcmePress(AcmeNews):
+        part_of = "acme"
+
+    monkeypatch.setenv(registry.SELECTION_VAR, "")  # every plugin found (restored after)
+    found = installed(AcmeFeed(), AcmeForex(), AcmePress(), acme_record("zenith"))
+    assert set(found) == {"acme", "acme-fx", "zenith"} and registry.selection().everything
+    assert registry.selection().text == "all" and registry.plugins_loaded() == ["acme", "zenith"]
+    chosen = registry.select(["acme-fx", "nobody"])  # a part's name keeps its whole plugin, its publishers too
+    assert chosen.names == ("acme-fx", "nobody") and chosen.left_out == ("zenith",) and chosen.unknown == ("nobody",)
+    assert set(registry.providers()) == {"acme", "acme-fx"} and set(registry.publishers()) == {"acme-news"}
+    assert registry.plugins_loaded() == ["acme"] and registry.errors() == []  # left out quietly, not broken
+    assert os.environ[registry.SELECTION_VAR] == "acme-fx,nobody"  # what a process started now inherits
+    assert chosen.text == "acme-fx,nobody" and [r["name"] for r in menu()] == ["acme"]  # the menu lists plugins, their feeds under them
+    none = registry.select("none")
+    assert none.names == () and none.text == "none" and registry.providers() == {} and registry.publishers() == {}
+    assert none.left_out == ("acme", "zenith") and registry.plugins_loaded() == [] and variables() == ()
+    assert registry.select(None).everything and set(registry.providers()) == {"acme", "acme-fx", "zenith"}
+    assert registry.SELECTION_VAR not in os.environ
+    monkeypatch.setenv(registry.SELECTION_VAR, "ZENITH, acme-news")  # as typed: any case, commas or spaces
+    registry.reload()
+    assert registry.selection().names == ("zenith", "acme-news") and set(registry.providers()) == {"acme", "acme-fx", "zenith"}
+    assert registry.selection().left_out == () and registry.Selection.parse(" All ").everything

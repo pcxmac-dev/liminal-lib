@@ -40,10 +40,18 @@ class is written for 2.x, the record form (Provider, Publisher: the hooks as cal
 package's may leave it empty: its distribution's is used) and the contract it was written for
 (`api`). One written for another major, or for a newer minor than this app offers, is left out and
 reported like a broken one.
+
+Which plugins a process loads is a selection (`Selection`, LIMINAL_PLUGINS_LOADED; `select`,
+`selection`, `plugins_loaded`): every plugin found by default, the ones named (each with its parts),
+or none at all (the user, 2026-11-03: "the default case is to load all plugins, however the
+integrator can be loaded with select plugins or none": the integrator's `--plugins`). The plugins
+found but not named are left out quietly (`Selection.left_out`, not `errors()`), and a process
+started by this one inherits the selection.
 """
 from __future__ import annotations
 
 import importlib
+import os
 import pkgutil
 import sys
 import threading
@@ -308,6 +316,40 @@ _providers: dict[str, FeedPlugin] | None = None
 _publishers: dict[str, PublisherPlugin] = {}
 _assistants: dict[str, "AssistantPlugin"] = {}  # the AI assistants (2.0; assistants/plugin.py)
 _errors: list[tuple[str, str]] = []
+SELECTION_VAR = "LIMINAL_PLUGINS_LOADED"  # the plugins a process loads: names, `none`, or unset for all
+
+
+@dataclass(frozen=True)
+class Selection:
+    """Which plugins a process loads (LIMINAL_PLUGINS_LOADED): the plugins' names, comma separated
+    (a part's name keeps its whole plugin: boats keeps Alpaca, sec keeps Federal), `none` for no
+    plugin at all, unset or `all` for every plugin found. Once applied (discovery) it lists the
+    plugins found but not named and the names no plugin answers to."""
+    names: tuple[str, ...] | None = None  # None: every plugin found; (): none at all
+    left_out: tuple[str, ...] = ()  # the plugins found but not named (by plugin, its parts with it)
+    unknown: tuple[str, ...] = ()  # the names no plugin found answers to
+
+    @classmethod
+    def parse(cls, raw: "str | None") -> "Selection":
+        """As typed: names comma or space separated, any case; `none`; empty or `all`."""
+        text = (raw or "").strip().lower()
+        if not text or text == "all":
+            return cls(None)
+        if text == "none":
+            return cls(())
+        return cls(tuple(dict.fromkeys(text.replace(",", " ").split())))
+
+    @property
+    def everything(self) -> bool:
+        return self.names is None
+
+    @property
+    def text(self) -> str:
+        """What LIMINAL_PLUGINS_LOADED holds for it: `all`, `none`, or the names comma separated."""
+        return "all" if self.names is None else "none" if not self.names else ",".join(self.names)
+
+
+_selection = Selection()  # the one applied when the plugins were found
 
 NAMES = ("PLUGIN", "PUBLISHER", "ASSISTANT")  # what a module calls its plugin (the plural: several)
 
@@ -501,6 +543,8 @@ def discover_everything() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlu
                 continue
             lives.update({x.name: p.name for x in p.live})
         mine[p.name] = p
+    global _selection
+    _selection = _apply_selection(Selection.parse(os.environ.get(SELECTION_VAR)), out, pubs, assts)
     from ..freshness import DELAYS  # when loaded, not on import: the freshness rules import the calendars
 
     for p in out.values():
@@ -510,6 +554,75 @@ def discover_everything() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlu
 
 
 _databases_refused = databases_refused  # its name before 2.0 (sources/plugin.py: Plugin.refusal)
+
+
+def _owner(p: Plugin, feeds: Mapping[str, FeedPlugin], pubs: Mapping[str, PublisherPlugin]) -> str:
+    """The plugin a loaded plugin is listed under (plugin_of, publisher_of: before the registry
+    holds them): the one it is part of, else itself."""
+    if isinstance(p, PublisherPlugin):
+        if p.part_of and p.part_of != p.name:
+            if p.part_of in pubs:
+                return p.part_of
+            if p.part_of in feeds:
+                return _owner(feeds[p.part_of], feeds, pubs)
+        return p.name
+    if isinstance(p, FeedPlugin) and p.part_of and p.part_of != p.name and p.part_of in feeds:
+        return p.part_of
+    return p.name
+
+
+def _apply_selection(chosen: Selection, feeds: dict, pubs: dict, assts: dict) -> Selection:
+    """The selection applied to what was found: the plugins not named taken out of the three (each
+    with its parts), the names answering to no plugin noted. What applied."""
+    if chosen.everything:
+        return chosen
+    found = {**feeds, **pubs, **assts}
+    owners = {n: _owner(p, feeds, pubs) for n, p in found.items()}
+    wanted = {owners[n] for n in chosen.names if n in owners}
+    left_out: list[str] = []
+    for d in (feeds, pubs, assts):
+        for n in list(d):
+            if owners[n] not in wanted:
+                d.pop(n)
+                if owners[n] not in left_out:
+                    left_out.append(owners[n])
+    return replace(chosen, left_out=tuple(left_out), unknown=tuple(n for n in chosen.names if n not in owners))
+
+
+def selection() -> Selection:
+    """The selection applied when the plugins were found (LIMINAL_PLUGINS_LOADED as it then read)."""
+    with _lock:
+        providers()
+        return _selection
+
+
+def select(names: "Iterable[str] | str | None") -> Selection:
+    """Load these plugins alone from now on, in this process and the ones it starts: names (a list,
+    or their text comma separated), `none` or [] for no plugin at all, None or `all` for every plugin
+    found. LIMINAL_PLUGINS_LOADED is set so and the plugins found again; what applied is returned."""
+    chosen = Selection.parse(names if names is None or isinstance(names, str) else ",".join(names))
+    if chosen.everything:
+        os.environ.pop(SELECTION_VAR, None)
+    else:
+        os.environ[SELECTION_VAR] = chosen.text
+    reload()
+    return selection()
+
+
+def plugins_loaded() -> list[str]:
+    """The plugins loaded, by name, each once with its parts under it (Alpaca for alpaca and boats,
+    Federal for its agencies, Massive for its headlines), in their order."""
+    out: list[str] = []
+    for n in providers():
+        if (p := plugin_of(n)) not in out:
+            out.append(p)
+    for n in publishers():
+        if (p := publisher_of(n)) not in out:
+            out.append(p)
+    for n in assistants():
+        if n not in out:
+            out.append(n)
+    return out
 
 
 def providers() -> dict[str, FeedPlugin]:

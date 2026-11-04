@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.1 (2026-11-03)
+
+Which plugins a process loads is a selection (`registry.Selection`, LIMINAL_PLUGINS_LOADED; `select`,
+`selection`, `plugins_loaded`): every plugin found by default, the ones named (each with its parts: boats
+keeps Alpaca, sec keeps Federal), or none at all (the user: "the default case is to load all plugins,
+however the integrator can be loaded with select plugins or none"; the integrator's `--plugins`). The
+plugins found but not named are left out quietly (`Selection.left_out`, not `errors()`), a name no plugin
+answers to is noted (`unknown`), and a process started by this one inherits the selection. LIMINAL_PLUGINS_LOADED
+and LIMINAL_INTEGRATOR_NAME (an integrator of its own, liminal-integrator 1.4.0) are the app's variables
+(`keys.APP`), no plugin's.
+
 ## 1.3.0 (2026-11-03)
 
 The class contract, plugin API 2.0 (the user: "all the plugins under liminal should basically follow
