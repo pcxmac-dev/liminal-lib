@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from liminal_lib import config, layout
+from liminal_libs import config, layout
 
 
 def test_the_workspace_is_found_by_its_four_folders_or_named(tmp_path, monkeypatch):

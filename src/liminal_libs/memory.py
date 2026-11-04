@@ -18,7 +18,7 @@ import ctypes
 import os
 import time
 
-APP = "liminal_app"  # the app's module (python -m liminal_app ...); its console script is `liminal` (resources.APP_WORDS)
+APP = "liminal_charts"  # the app's module (python -m liminal_charts ...); its console script is `liminal` (resources.APP_WORDS)
 MB = 2**20
 
 

@@ -1,4 +1,4 @@
-"""AI assistants (plugin API 2.0): the assistant plugins (liminal-plugin-ai-claude, -grok, -codex) and
+"""AI assistants (plugin API 2.0): the assistant plugins (plugin-platform-claude, -grok, -codex) and
 what the app and the other plugins ask of them through the library: evaluate a standardized argument
 (arguments.py: a Question over context items, a Judge over earlier evaluations), by the assistant you
 chose (LIMINAL_ASSISTANT) or each one set up, and keep the evaluations (storage/evaluations.py).

@@ -1,10 +1,10 @@
 """The Liminal library: the stores, the plugin contract, the collector and the scheme every Liminal
 program builds on (the chart app, the integrator, the plugins). The user, 2026-11-01: "all lib
-calls will point to liminal-lib"."""
+calls will point to liminal-libs"."""
 
 import os
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 
 def limit_threads() -> None:

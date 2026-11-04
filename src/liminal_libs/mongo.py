@@ -174,7 +174,7 @@ def _fail(data_dir: Path):
 
 
 # -- the keeper: a resident host (host.py) -----------------------------------------------------
-# The server runs under a keeper, `liminal host mongo`: a process whose documents live
+# The server runs under a keeper, `liminal-charts host mongo`: a process whose documents live
 # in MongoDB attaches to the keeper (attach, once for the process's life, or until detach), the
 # keeper starts the server for its first client, and shuts it down cleanly once its last client
 # has been gone for the idle time (the user, 2026-11-01: "attached software like duckdb or what

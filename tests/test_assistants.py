@@ -1,4 +1,4 @@
-"""The AI assistants (plugin API 2.0, liminal_lib.assistants): standardized arguments rendered and
+"""The AI assistants (plugin API 2.0, liminal_libs.assistants): standardized arguments rendered and
 read back, an assistant plugin's variables and settings derived from its tables, the registry's
 assistant kind, an evaluation end to end on a fake session (the account sent as a digest, never the
 email; the caps; the record kept), Connect reading the plan from the server's limits, errors mapped
@@ -12,21 +12,21 @@ from types import SimpleNamespace
 import pytest
 import requests
 
-from liminal_lib import layout, sourcing
-from liminal_lib.assistants import (Answer, ContextItem, Judge, Offline, Question, ResponsesAssistant, argument_from_dict,
+from liminal_libs import layout, sourcing
+from liminal_libs.assistants import (Answer, ContextItem, Judge, Offline, Question, ResponsesAssistant, argument_from_dict,
                                     evaluate, evaluate_all, judge, parse_fields, parse_verdict)
-from liminal_lib.assistants.assistant import Caps, Model, Plan, Source
-from liminal_lib.assistants.context import item_from
-from liminal_lib.assistants.evaluation import Evaluation, Usage
-from liminal_lib.assistants.plugin import AssistantPlugin
-from liminal_lib.assistants.verify import check_sources, text_of
-from liminal_lib.config import ConfigError, load_settings
-from liminal_lib.errors import BudgetExhausted, NotEntitled, RateLimited, SourceError, Unauthorized
-from liminal_lib.ratelimit import MachineLedger, fingerprint
-from liminal_lib.sources import registry
-from liminal_lib.sources.http import HttpClient
-from liminal_lib.sources.registry import plugin_databases, plugin_keys, variables
-from liminal_lib.storage import Store
+from liminal_libs.assistants.assistant import Caps, Model, Plan, Source
+from liminal_libs.assistants.context import item_from
+from liminal_libs.assistants.evaluation import Evaluation, Usage
+from liminal_libs.assistants.plugin import AssistantPlugin
+from liminal_libs.assistants.verify import check_sources, text_of
+from liminal_libs.config import ConfigError, load_settings
+from liminal_libs.errors import BudgetExhausted, NotEntitled, RateLimited, SourceError, Unauthorized
+from liminal_libs.ratelimit import MachineLedger, fingerprint
+from liminal_libs.sources import registry
+from liminal_libs.sources.http import HttpClient
+from liminal_libs.sources.registry import plugin_databases, plugin_keys, variables
+from liminal_libs.storage import Store
 
 NOW = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)
 KEY, EMAIL = "sk-acme-secret-key-123", "me@example.com"
@@ -325,7 +325,7 @@ def test_connect_reads_the_plan_from_the_servers_limits_and_checks_the_tables(in
     assert session.calls[0][0] == "GET" and session.calls[0][1] == "https://api.acme-ai.example/v1/models"
     assert session.calls[1][3]["max_output_tokens"] == 16 and session.calls[1][3]["instructions"] == "Reply with the single word OK."
     # the plan found is applied where the user set none (config.with_detected), as a feed's is
-    from liminal_lib.config import with_detected
+    from liminal_libs.config import with_detected
 
     applied = with_detected(settings_for(ACME_AI_API_KEY=KEY), scanned.plan)
     assert applied.plugin("acme-ai").plan == "grow" and applied.detected == {"ACME_AI_PLAN": "grow"}

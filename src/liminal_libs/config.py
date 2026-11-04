@@ -6,7 +6,7 @@ Settings come from environment variables, optionally loaded from a `.env` file
     LIMINAL_DB        path of the SQLite database (default: ~/LiminalData/liminal.db)
     (A feed's key, plans and caps are its plugin's own settings, read with these (Provider.settings,
     plugin API 1.11): Massive's MASSIVE_API_KEY, MASSIVE_TIER and the other classes' plans, MASSIVE_RPM,
-    MASSIVE_BASE_URL and MASSIVE_MAX_REQUESTS_PER_RUN / _DAY are liminal-plugin-massive's, in its README.)
+    MASSIVE_BASE_URL and MASSIVE_MAX_REQUESTS_PER_RUN / _DAY are plugin-integrator-massive's, in its README.)
     LIMINAL_REFRESH_HOURS  extra minimum hours between refreshes of a backfilled symbol (default: 0;
                            symbols are already only refreshed when their plan should have new data)
     SOURCE_PRIORITY   feed order when sources overlap (default: massive,alpaca); a span is downloaded by
@@ -32,9 +32,9 @@ Settings come from environment variables, optionally loaded from a `.env` file
 
 Public historical sources (closed feeds: they fill history nobody else holds, then are not asked
 again): Bitstamp, Coinbase and Bitfinex (crypto bars) and Cboe (index daily history), each its own
-package (liminal-plugin-<name>: pip install -e ".[plugins]"), need nothing; Tiingo (US stock daily
-bars from 1962, its forex; liminal-plugin-tiingo) a free account key, TIINGO_API_KEY (environment
-only; each plugin's keys: `liminal plugins`);
+package (plugin-integrator-<name>: pip install -e ".[plugins]"), need nothing; Tiingo (US stock daily
+bars from 1962, its forex; plugin-integrator-tiingo) a free account key, TIINGO_API_KEY (environment
+only; each plugin's keys: `liminal-charts plugins`);
     CRYPTO_VENUE_DAYS limit the crypto exchange feeds (Coinbase, Bitfinex) to this many days of history
                       (default: 0, everything they hold: Coinbase from 2015, Bitfinex from 2013)
 
@@ -42,7 +42,7 @@ Government and regulators (gov.py; the Gov view): the Fed, BLS, the Federal Regi
 Fed need nothing. GOV_CONTACT (your name and email) is sent to the agencies that ask automated
 readers to identify themselves (the SEC): their feeds wait until it is set.
 
-Alpaca (second feed; stocks and crypto) is the liminal-plugin-alpaca package: its keys
+Alpaca (second feed; stocks and crypto) is the plugin-integrator-alpaca package: its keys
 (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY), plan, feed, crypto venue, paper or live host and caps are
 its own settings (Provider.settings, plugin API 1.11: Settings.plugin("alpaca")), documented in its
 README; keys are only ever read from the environment. The live streams:
@@ -97,7 +97,7 @@ class Tier:
 # Backfill depth used when a plan has no history limit and its source no known start.
 UNLIMITED_BACKFILL_YEARS = 20
 # The settings' plan where no feed's view has set one (Settings.for_source): no plan at all. Each
-# feed's plans are its plugin's (Massive's TIERS in liminal-plugin-massive).
+# feed's plans are its plugin's (Massive's TIERS in plugin-integrator-massive).
 NO_PLAN = Tier("none", requests_per_minute=None, history_years=None)
 
 

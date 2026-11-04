@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 # The user, 2026-11-02: "common, app and store are the required folders, plugins as well, make sure
 # the app is in the app folder, make sure the integrator is in the store w/ the databases, make sure
 # plugins get loaded in to plugins, and lib is in common". One folder holds the four: common/ the
-# library's checkout (liminal-lib), app/ the chart app's (liminal), store/ the integrator's
+# library's checkout (liminal-libs), app/ the chart app's (liminal), store/ the integrator's
 # (liminal-integrator) with the databases in store/data/, plugins/ a checkout per plugin, loaded
 # from there (sources/registry.py: the plugin directory the fetcher assigns).
 HOME_VAR = "LIMINAL_HOME"
@@ -43,7 +43,7 @@ def home() -> Path | None:
     named = os.environ.get(HOME_VAR)
     if named:
         return Path(named).expanduser()
-    root = Path(__file__).resolve().parents[3]  # src/liminal_lib/layout.py: src, common, the workspace
+    root = Path(__file__).resolve().parents[3]  # src/liminal_libs/layout.py: src, common, the workspace
     return root if all((root / f).is_dir() for f in FOLDERS) else None
 
 

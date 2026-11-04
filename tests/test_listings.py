@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import pytest
 
-from liminal_lib import models
-from liminal_lib.models import COUNTRIES, VENUES, exchange_mic, exchange_timezone, is_foreign, listing_ticker, parse_symbol
-from liminal_lib.sources.registry import Provider
-from liminal_lib.symbols import resolve
+from liminal_libs import models
+from liminal_libs.models import COUNTRIES, VENUES, exchange_mic, exchange_timezone, is_foreign, listing_ticker, parse_symbol
+from liminal_libs.sources.registry import Provider
+from liminal_libs.symbols import resolve
 
 
 @pytest.mark.parametrize("typed, ticker, exchange", [

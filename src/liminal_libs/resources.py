@@ -97,12 +97,14 @@ LOOPBACK = ("127.", "::1", "0.0.0.0", "::")
 REMOTES = 6  # remote endpoints listed per process (the busiest)
 
 
-APP_WORDS = ("liminal_app", "liminal")  # the app's module (python -m liminal_app ...) and its console script (liminal ...)
+# the charts app's module (python -m liminal_charts ...) and its console script (liminal-charts ...); the names
+# from before the rename (liminal_app, liminal: a task registered on them, a process started before) read the same
+APP_WORDS = ("liminal_charts", "liminal-charts", "liminal_app", "liminal")
 
 
 def _app_index(words: list[str]) -> int | None:
-    """Where the app's name sits in a command line: `python -m liminal_app gui`, `liminal gui`,
-    `C:\\...\\Scripts\\liminal.exe gui` (the console script; the old module name is read the same way)."""
+    """Where the app's name sits in a command line: `python -m liminal_charts gui`, `liminal-charts gui`,
+    `C:\\...\\Scripts\\liminal-charts.exe gui` (the console script; the old module name is read the same way)."""
     for i, word in enumerate(words):
         name = word.replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
         if name in APP_WORDS:
@@ -111,7 +113,7 @@ def _app_index(words: list[str]) -> int | None:
 
 
 def app_args(command: str) -> list[str] | None:
-    """The words after the app's name in a command line (`gui --port 8765` of `python -m liminal_app
+    """The words after the app's name in a command line (`gui --port 8765` of `python -m liminal_charts
     gui --port 8765`); None when the command is not the app's."""
     words = command.replace('"', " ").split()
     at = _app_index(words)

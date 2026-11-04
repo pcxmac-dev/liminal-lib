@@ -3,7 +3,7 @@
 
 A plugin is a module that defines `PLUGIN` (a FeedPlugin subclass, or an instance of one: a Provider
 record; `PLUGINS` for several), a publisher's `PUBLISHER` (sources/publisher.py) or an assistant's
-`ASSISTANT` (assistants/plugin.py). Every one is a package of its own (liminal-plugin-<name>,
+`ASSISTANT` (assistants/plugin.py). Every one is a package of its own (plugin-integrator-<name>,
 2026-11-01), registering under the entry point group `liminal.providers` (pointing at the module, or
 at the plugin itself); the plugin directory's checkouts are loaded from there (plugin_checkouts),
 and a module dropped in `sources/plugins/` is still found on the next start, as the built-ins were.
@@ -11,7 +11,7 @@ and a module dropped in `sources/plugins/` is still found on the next start, as 
 What a plugin gives:
 - `build(settings, request_budget)`: its DataSource (sources/base.py), with its limiter and caps.
 - its keys (`KeyVar`: user environment variables; never written to a file), and how to get one
-  (`signup`): tools/set-key.ps1 offers each plugin's keys from `liminal plugins --json`.
+  (`signup`): tools/set-key.ps1 offers each plugin's keys from `liminal-charts plugins --json`.
 - what it serves: asset classes (`assets`; `keyless` the ones it serves without keys), the market
   each is (`markets`), whether it carries a symbol (`carries`), and whether it is a closed archive.
 - its plan, rate window and caps (`view`, `rate`), and what its server publishes (`limits`).

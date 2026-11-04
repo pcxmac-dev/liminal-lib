@@ -3,7 +3,7 @@ counts as one too (the collector's tests run fakes that name none): the app asks
 ticker belongs to, so a crypto pair's spans on two exchanges are two markets."""
 from types import SimpleNamespace
 
-from liminal_lib.coverage import same_market
+from liminal_libs.coverage import same_market
 
 FEEDS = {"bitstamp": SimpleNamespace(venues={"crypto": "bitstamp"}), "coinbase": SimpleNamespace(venues={"crypto": "coinbase"}),
          "massive": SimpleNamespace(venues={"crypto": "consolidated", "stock": "sip"}),

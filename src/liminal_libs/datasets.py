@@ -10,9 +10,9 @@ in a file of their own (datasets/<provider>.db), and each dataset has a quality 
 
 Every dataset is declared by the publisher plugin that puts it out (Publisher.datasets, a
 sources.dataset.Dataset: its files, parser and publication rule), so a new one is a plugin's:
-- Ken French's Data Library (the liminal-plugin-french package): Fama/French 3 and 5 factors, 49 industry
+- Ken French's Data Library (the plugin-integrator-french package): Fama/French 3 and 5 factors, 49 industry
   portfolios; daily and monthly, from 1926 (1963 for 5 factors). Returns in percent.
-- Datahub's core datasets on GitHub (liminal-plugin-datahub; the mirrors' submodules stay here, in
+- Datahub's core datasets on GitHub (plugin-integrator-datahub; the mirrors' submodules stay here, in
   data/github/): the S&P 500's members with GICS sector and
   sub-industry (the market map's sectors), Robert J. Shiller's US stock market data from 1871, and
   the IMF's primary commodity prices 1980-2017 (a frozen mirror: an archive, closed once imported).

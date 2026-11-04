@@ -16,7 +16,7 @@ and left off for a while, longer each time:
   last (30 min, 1 h, 2 h, 4 h, 8 h, then 24 h each time); a day without one starts over.
 - **Everywhere:** kills are kept in the database (kv `kill:<feed>:<live|fetch>`), so every
   process honours them (the recorder, the hourly sync, a run the chart starts) and a restart
-  does not clear them. Only the user does: `liminal kills release FEED`.
+  does not clear them. Only the user does: `liminal-charts kills release FEED`.
   `kills kill FEED` cuts one off by hand; `kills` lists them with each feed's outcomes. The Fetcher view shows a killed
   feed as "killed", the Live view its stream.
 - **One recorder per machine, strictly:** the recorder holding the machine lock ends any other

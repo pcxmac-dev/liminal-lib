@@ -316,7 +316,7 @@ def attach(name: str, db_path: Path, start: Callable[[], None] | None = None, wa
     return Attachment(name, db_path, conn, int(answer.get("pid") or 0))
 
 
-APP_MODULE = "liminal_app"  # the app's package: `python -m liminal_app host NAME` runs a host (its cli, cmd_host)
+APP_MODULE = "liminal_charts"  # the app's package: `python -m liminal_charts host NAME` runs a host (its cli, cmd_host)
 
 
 def start_host(name: str, db_path: Path) -> None:

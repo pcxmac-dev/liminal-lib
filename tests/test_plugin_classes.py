@@ -11,17 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from liminal_lib import freshness, gov, layout
-from liminal_lib.config import Tier, load_settings
-from liminal_lib.freshness import Delay
-from liminal_lib.sources import feed_profiles, registry
-from liminal_lib.sources.archive import CryptoVenuePlugin, PublicFeedPlugin
-from liminal_lib.sources.http import PublicClient
-from liminal_lib.sources.keys import KeyVar
-from liminal_lib.sources.publisher import Feed, Policy, Publisher, PublisherPlugin
-from liminal_lib.sources.registry import (PLUGIN_API, RECORD_API, FeedPlugin, Provider, Scanned, api_refusal, menu,
+from liminal_libs import freshness, gov, layout
+from liminal_libs.config import Tier, load_settings
+from liminal_libs.freshness import Delay
+from liminal_libs.sources import feed_profiles, registry
+from liminal_libs.sources.archive import CryptoVenuePlugin, PublicFeedPlugin
+from liminal_libs.sources.http import PublicClient
+from liminal_libs.sources.keys import KeyVar
+from liminal_libs.sources.publisher import Feed, Policy, Publisher, PublisherPlugin
+from liminal_libs.sources.registry import (PLUGIN_API, RECORD_API, FeedPlugin, Provider, Scanned, api_refusal, menu,
                                           plugin_databases, plugin_keys, publisher_menu, variables)
-from liminal_lib.sources.stream import Live
+from liminal_libs.sources.stream import Live
 
 
 @pytest.fixture
@@ -116,7 +116,7 @@ class AcmeNews(PublisherPlugin):
 
 
 def test_what_a_plugin_is():
-    from liminal_lib.sources.registry import IntegratorPlugin, PlatformPlugin
+    from liminal_libs.sources.registry import IntegratorPlugin, PlatformPlugin
 
     assert AcmeFeed.KIND == "feed" == Provider.KIND and AcmeNews.KIND == "publisher" == Publisher.KIND
     assert AcmeFeed.SYSTEM == "integrator" == AcmeNews.SYSTEM and issubclass(AcmeFeed, IntegratorPlugin)

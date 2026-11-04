@@ -6,7 +6,7 @@ how), its ticks, what it is set to collect, and which frames it should have buil
 (derive.py builds every standard frame above each base frame a feed holds: 10 and 30 s from seconds;
 5 and 30 min, 1, 2 and 4 h and 1 day from minutes; weeks, months and years from days). Feeds come
 in the order a merged chart takes them. Read by the chart's side panel (/api/inventory) and
-`liminal inventory TICKER`.
+`liminal-charts inventory TICKER`.
 """
 from __future__ import annotations
 

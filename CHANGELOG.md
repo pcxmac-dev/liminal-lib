@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0 (2026-11-03)
+
+Renamed `liminal-libs` (the package `liminal_libs`): the naming by system (the user, 2026-11-03: apps are
+`liminal-<app>`, the one library `liminal-libs`, plugins `plugin-<app>-<name>`). The charts app is
+`liminal-charts` (`liminal_charts`, the command `liminal-charts`; `host.APP_MODULE`), the stock-data
+plugins `plugin-integrator-<name>`, the AI plugins `plugin-platform-<name>`; `resources.role_of` reads
+the new names and the old (a task registered before). INTEGRATION.md: how the repositories fit
+together. Every import of `liminal_lib` becomes `liminal_libs`; nothing else changes.
+
 ## 1.3.1 (2026-11-03)
 
 Which plugins a process loads is a selection (`registry.Selection`, LIMINAL_PLUGINS_LOADED; `select`,
@@ -32,7 +41,7 @@ exchange's plan and caps, `CRYPTO_VENUE_DAYS`). `Scanned`, `Report`, `Limits`, `
 `minute_window`, `within`, `server_limits`, `server_per_minute` moved to `sources/plugin.py`, still
 imported from the registry.
 
-The AI assistant kind, `liminal_lib.assistants` (the user: three AI plugins "that have a vanilla API, are
+The AI assistant kind, `liminal_libs.assistants` (the user: three AI plugins "that have a vanilla API, are
 compliant with the rest of the plugin structure ... but allow interfacing with Claude, Grock and ChatGPT
 Codex via API key, an email / account name", "used to evaluate certain standardized arguments from other
 plugins or apps", "extensible, and allow for higher order evaluation"). `AssistantPlugin` (`assistants/plugin.py`:
@@ -98,15 +107,15 @@ the feeds carrying it; audits, bad-data scans and the live recorder leave listin
 
 ## 1.1.1 (2026-11-02)
 
-The Resources sampler reads the app's processes under their new names: `python -m liminal_app ...` and the
+The Resources sampler reads the app's processes under their new names: `python -m liminal_charts ...` and the
 console script (`liminal ...`, `liminal.exe` on Windows), the old module name still (`resources.APP_WORDS`).
 
 ## 1.1.0 (2026-11-02)
 
-The app is liminal-app (the user: "lets rename the app to liminal-app", "not liminal", "refactor"): hosts start as
-`python -m liminal_app host NAME` (`host.APP_MODULE`), messages name the `liminal` command (the app's console
+The app is liminal-charts (the user: "lets rename the app to liminal-charts", "not liminal", "refactor"): hosts start as
+`python -m liminal_charts host NAME` (`host.APP_MODULE`), messages name the `liminal` command (the app's console
 script) instead of `python -m liminal`, and the library's import test refuses the app and the integrator under
-their new names. Plugins import the library as `liminal_lib` from their next releases.
+their new names. Plugins import the library as `liminal_libs` from their next releases.
 
 ## 1.0.1 (2026-11-02)
 
@@ -118,7 +127,7 @@ installed as a package besides is not loaded twice).
 ## 1.0.0 (2026-11-01)
 
 The library, out of the app ([liminal](https://github.com/pcxmac-dev/liminal), feature/collector at d21b4b8):
-every module but the app's own, their names kept, as the package `liminal_lib`. The regular session's filter,
+every module but the app's own, their names kept, as the package `liminal_libs`. The regular session's filter,
 masks and close moved in from the chart's bars module (`sessions.py`); the market proxies became a parameter of
 `collector.sync`. New: `logs.py`, the fetcher's host name and its clients' side in `host.py`, `stores.history_due`,
 `sources.feed_closed`, `proc.hold_until_interrupted`, the fetcher's requests in `storage/requests.py`.

@@ -146,7 +146,7 @@ FIRST_REAP_SECONDS = 2 * LOCK_CHECK_SECONDS
 # downloads it). A waiting trade is a dict of about TRADE_BYTES (its keys shared): some 110,000.
 MAX_BUFFERED_BYTES = 64 * 2**20
 TRADE_BYTES = 600
-# a recorder (not `live status`, `live stop`): `python -m liminal_app live`, `liminal live` (the console
+# a recorder (not `live status`, `live stop`): `python -m liminal_charts live`, `liminal-charts live` (the console
 # script, `liminal.exe` on Windows), or the old module name
 RECORDER_COMMAND = re.compile(r"(?:-m\s+liminal(?:_app)?|[\\/]liminal(?:\.exe)?|^liminal(?:\.exe)?)\s+live\s*$")
 DAY_MS = 86_400_000
@@ -972,7 +972,7 @@ def reap_strays(log=print, others=None, terminate=None) -> int:
 # The recorder runs as the host `live`: started by the first client to attach (the chart app, while
 # a chart has a symbol open: gui/server.py note_open), gone once the last client has detached for
 # the idle time, its trades flushed first (the user, 2026-11-01: no processes or open databases when
-# the app is not in use). `liminal host live` runs it; `liminal live` runs one
+# the app is not in use). `liminal-charts host live` runs it; `liminal-charts live` runs one
 # in the foreground, a client of nobody, until Ctrl+C.
 HOST = "live"
 

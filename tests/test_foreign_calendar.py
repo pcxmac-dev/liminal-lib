@@ -6,9 +6,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from liminal_lib import coverage, freshness
-from liminal_lib.config import Tier
-from liminal_lib.sessions import ET, MarketCalendar
+from liminal_libs import coverage, freshness
+from liminal_libs.config import Tier
+from liminal_libs.sessions import ET, MarketCalendar
 
 THANKSGIVING = date(2026, 11, 26)  # a US holiday, a Thursday: Tokyo trades
 TIER = Tier("twse", requests_per_minute=10, history_years=None, history_start=date(2010, 1, 4))

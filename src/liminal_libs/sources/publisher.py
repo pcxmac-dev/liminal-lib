@@ -4,7 +4,7 @@ sync; and the datasets it puts out (sources/dataset.py), fetched by `datasets` (
 
 A plugin's module defines `PUBLISHER` (a PublisherPlugin, plugin API 2.0: a subclass or an instance;
 the record form `Publisher`, 1.x; `PUBLISHERS` for several), beside or instead of a feed's `PLUGIN`:
-the federal agencies are parts of one plugin (the liminal-plugin-federal
+the federal agencies are parts of one plugin (the plugin-integrator-federal
 package, a module each: fed.py, sec.py ...; `part_of`), a vendor's headlines sit in its feed's module
 (massive.py), its requests on that feed's account, and a library of datasets is a publisher with no
 feeds (the French and Datahub packages; the CFTC's in Federal).

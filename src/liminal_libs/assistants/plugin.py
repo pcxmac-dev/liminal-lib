@@ -2,7 +2,7 @@
 plans, models and prices written in and dated, its key and account from the user's environment
 variables, and conservative caps on what it may spend a day on this machine.
 
-A plugin is a subclass of `AssistantPlugin` (liminal-plugin-ai-claude: `ClaudePlugin`; -grok:
+A plugin is a subclass of `AssistantPlugin` (plugin-platform-claude: `ClaudePlugin`; -grok:
 `GrokPlugin`; -codex: `CodexPlugin`) declaring its `vendor`, its `assistant` (an Assistant subclass:
 the vendor's headers, body, parsing and error shapes), its tables (`plans`, free first; `models`, the
 default first; `sources`: the pages they were written from; `verified`: the date they were checked),

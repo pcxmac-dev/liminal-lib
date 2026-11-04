@@ -83,7 +83,7 @@ for _tier in ("twse", "tpex", "b3", "alphavantage-free", "jquants-light", "jquan
 PLAN_DELAYS["jquants-free"] = {"stock": Delay("eod", timedelta(weeks=12))}
 PLAN_DELAYS["twelvedata-free"] = {"fx": Delay("utc_day")}
 
-# Cboe's VIX futures files (liminal-plugin-cboe's cboefutures feed): a contract's day comes with its
+# Cboe's VIX futures files (plugin-integrator-cboe's cboefutures feed): a contract's day comes with its
 # settlement after the session, so its day bars are expected once the session is over, like a
 # stock's on an end-of-day plan (the futures session dates: CME's, 18:00 to 17:00 ET).
 PLAN_DELAYS["cboe-futures"] = {"future": Delay("eod")}

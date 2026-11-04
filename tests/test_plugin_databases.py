@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from liminal_lib.sources import registry
-from liminal_lib.sources.registry import Provider, plugin_databases
-from liminal_lib.sources.stream import Live
+from liminal_libs.sources import registry
+from liminal_libs.sources.registry import Provider, plugin_databases
+from liminal_libs.sources.stream import Live
 
 
 @pytest.fixture
