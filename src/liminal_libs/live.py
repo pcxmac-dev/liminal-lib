@@ -148,7 +148,10 @@ MAX_BUFFERED_BYTES = 64 * 2**20
 TRADE_BYTES = 600
 # a recorder (not `live status`, `live stop`): `python -m liminal_charts live`, `liminal-charts live` (the console
 # script, `liminal.exe` on Windows), or the old module name
-RECORDER_COMMAND = re.compile(r"(?:-m\s+liminal(?:_app)?|[\\/]liminal(?:\.exe)?|^liminal(?:\.exe)?)\s+live\s*$")
+# the recorder's command line: `-m liminal_charts live` (the old module names still: a process started before the
+# rename), `liminal-charts live` (the console script; `liminal.exe live` before)
+RECORDER_COMMAND = re.compile(r"(?:-m\s+liminal(?:_charts|_app)?|[\\/]liminal(?:-charts)?(?:\.exe)?|^liminal(?:-charts)?(?:\.exe)?)"
+                              r"\s+live\s*$")
 DAY_MS = 86_400_000
 
 

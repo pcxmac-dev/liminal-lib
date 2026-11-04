@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.2 (2026-11-03)
+
+The recorder's command pattern (`live.RECORDER_COMMAND`: a stray recorder ended by the one holding the
+machine lock) reads the new names, `-m liminal_charts live` and `liminal-charts live`, and the old ones
+still (a process started before the rename).
+
 ## 1.4.1 (2026-11-03)
 
 The class contract's conformance check, `sources/conformance.py` (the user: "evaluate each functional
