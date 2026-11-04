@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Mapping
 
 from ..config import ConfigError
 from ..sources.keys import KeyVar
-from ..sources.plugin import Plugin, Scanned
+from ..sources.plugin import PlatformPlugin, Scanned
 from .assistant import Assistant, AssistantSettings, Caps, Model, Plan, Source
 from .evaluation import Usage
 
@@ -34,7 +34,7 @@ TOKEN_CHOICES = ("200000", "50000", "100000", "500000", "1000000", "5000000")
 OUTPUT_CHOICES = ("1024", "256", "512", "2048", "4096", "8192")
 
 
-class AssistantPlugin(Plugin):
+class AssistantPlugin(PlatformPlugin):
     """An AI assistant's plugin: see the module's docstring. Its hooks: `settings` (AssistantSettings
     from the variables read), `build` (its Assistant), `scan` (Connect); what the app asks it goes
     through `keys_set`, `served`, `plan_state`, `rate_window`, `cost`, `free_note`."""
@@ -51,6 +51,7 @@ class AssistantPlugin(Plugin):
     sources: tuple[Source, ...] = ()
     caps: Caps = Caps()
     efforts: tuple[str, ...] = ()  # the effort levels its API takes ("" first: the vendor's default); empty: none
+    key_aliases: tuple[str, ...] = ()  # other names the key is read under (the vendor's own: ANTHROPIC_API_KEY)
     account_label: str = "account (email or name)"
     account_hint: str = "the email or name the key belongs to: shown with its evaluations, sent to the vendor only as a digest"
 
@@ -79,7 +80,8 @@ class AssistantPlugin(Plugin):
 
     @property
     def keys(self) -> tuple[KeyVar, ...]:
-        return (KeyVar(self.key_var, label=f"{self.vendor} API key", hint="an API key from the vendor's console"),
+        return (KeyVar(self.key_var, label=f"{self.vendor} API key", aliases=tuple(self.key_aliases),
+                       hint="an API key from the vendor's console"),
                 KeyVar(self.account_var, label=self.account_label, secret=False, hint=self.account_hint))
 
     @property
@@ -104,10 +106,6 @@ class AssistantPlugin(Plugin):
     def plan_note(self) -> str:
         return ("its plan is what you choose; Connect reads the limits its server sends and names the plan they show, "
                 f"applied where you set none (the tables verified {self.verified or 'at release'})")
-
-    @property
-    def signup(self) -> str:
-        return ""
 
     # -- the tables ----------------------------------------------------------------------------------
 
@@ -166,8 +164,9 @@ class AssistantPlugin(Plugin):
         effort = v.get(f"{self.var}_EFFORT", "")
         if effort and effort not in self.efforts:
             raise ConfigError(f"{self.var}_EFFORT: {effort!r} is not one of {', '.join(e or 'default' for e in self.efforts)}")
-        return AssistantSettings(self.name, plan.name, model, caps, effort, v.get(self.key_var) or None,
-                                 v.get(self.account_var) or "")
+        key, account = self.keys
+        return AssistantSettings(self.name, plan.name, model, caps, effort, key.value(variables) or None,
+                                 account.value(variables) or "")
 
     def build(self, settings: "Settings", session=None, now=None) -> Assistant:
         """Its Assistant on these settings (the plugin's own among them: Settings.plugin), with a

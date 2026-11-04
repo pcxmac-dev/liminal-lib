@@ -32,7 +32,7 @@ from ..layout import Database
 from .dataset import Dataset
 from .fetching import Fetcher
 from .keys import KeyVar
-from .plugin import Plugin
+from .plugin import IntegratorPlugin
 
 
 @dataclass
@@ -71,7 +71,7 @@ class Policy:
     terms_url: str = ""
 
 
-class PublisherPlugin(Plugin):
+class PublisherPlugin(IntegratorPlugin):
     """A publisher's plugin: what an agency, a vendor or a researcher publishes for programs (the
     module's docstring), its feeds and scrape checks, its datasets; the hooks `moments` (extra reads
     at its release moments), `calendar` (its scheduled releases, for the views) and `read` (a

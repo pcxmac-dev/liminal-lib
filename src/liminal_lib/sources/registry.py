@@ -57,9 +57,9 @@ from ..layout import MAIN, Database  # noqa: F401 - plugins import them from her
 from ..ratelimit import MachineLedger, RateLimiter  # plugins import MachineLedger from here (1.10)
 from .fetching import Fetched, FetchContext, Fetcher, Job  # noqa: F401 - plugins import them from here
 from .keys import KeyVar  # noqa: F401 - plugins import it from here
-from .plugin import (DEFAULT_PER_REQUEST, SERVER_SHARE, Capability, FeedPlugin, Limits,  # noqa: F401 - from here too
-                     Plugin, Report, Scanned, _per, databases_refused, minute_window, server_limits,
-                     server_per_minute, within)
+from .plugin import (DEFAULT_PER_REQUEST, SERVER_SHARE, Capability, FeedPlugin, IntegratorPlugin,  # noqa: F401 - from here too
+                     Limits, PlatformPlugin, Plugin, Report, Scanned, _per, databases_refused, minute_window,
+                     server_limits, server_per_minute, within)
 from .publisher import Publisher, PublisherPlugin
 from .stream import Live
 

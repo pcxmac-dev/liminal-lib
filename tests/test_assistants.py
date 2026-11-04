@@ -93,6 +93,7 @@ class AcmeAI(AssistantPlugin):
               Model("acme-pro", "Acme Pro", 2.0, 10.0, 0.5, 1_000_000, plans=("grow",), reasoning=True))
     sources = (Source("https://acme-ai.example/pricing", "the models' prices", "Prices per 1M tokens", ("acme-nano", "$0.05", "$0.40")),)
     efforts = ("", "low", "medium", "high")
+    key_aliases = ("ACME_KEY",)
 
 
 @pytest.fixture
@@ -161,8 +162,9 @@ def test_a_judge_renders_the_earlier_answers_as_its_inputs():
 
 def test_a_plugin_derives_its_variables_and_settings_from_its_tables():
     p = AcmeAI()
-    assert p.KIND == "assistant" and p.var == "ACME_AI" and [k.name for k in p.keys] == ["ACME_AI_API_KEY", "ACME_AI_ACCOUNT"]
-    assert p.keys[0].secret and not p.keys[1].secret and p.key_names == ("ACME_AI_API_KEY", "ACME_AI_ACCOUNT")
+    assert p.KIND == "assistant" and p.SYSTEM == "platform" and p.var == "ACME_AI" and [k.name for k in p.keys] == ["ACME_AI_API_KEY", "ACME_AI_ACCOUNT"]
+    assert p.keys[0].secret and not p.keys[1].secret and p.key_names == ("ACME_AI_API_KEY", "ACME_KEY", "ACME_AI_ACCOUNT")
+    assert p.settings({"ACME_KEY": KEY}).key == KEY  # the vendor's own variable name read too
     assert p.plan_vars == ("ACME_AI_PLAN", "ACME_AI_MODEL", "ACME_AI_REQUESTS_PER_DAY", "ACME_AI_TOKENS_PER_DAY")
     assert p.options == ("ACME_AI_MAX_OUTPUT_TOKENS", "ACME_AI_EFFORT")
     assert p.plan_choices["ACME_AI_PLAN"] == ("free", "build", "grow") and p.plan_choices["ACME_AI_MODEL"] == ("acme-nano", "acme-pro")
@@ -206,7 +208,7 @@ def test_the_registry_takes_an_assistant_and_the_settings_build_its_own(installe
     assert sourcing.detected_plans({"acme-ai": {"plan": {"ACME_AI_PLAN": "grow", "OTHER": "x"}}}) == {"ACME_AI_PLAN": "grow"}
     row = next(r for r in registry.assistant_menu(settings) if r["name"] == "acme-ai")
     assert row["keysSet"] and row["serves"] and row["plan"] == "build" and row["model"] == "acme-nano" and row["tables"]["vendor"] == "Acme"
-    assert row["keys"][0] == {"name": "ACME_AI_API_KEY", "label": "Acme API key", "aliases": [], "secret": True,
+    assert row["keys"][0] == {"name": "ACME_AI_API_KEY", "label": "Acme API key", "aliases": ["ACME_KEY"], "secret": True,
                               "hint": "an API key from the vendor's console", "set": True}
     with pytest.raises(ConfigError):
         settings_for(ACME_AI_PLAN="gold")  # a plan the table has not stops the app, as any setting's refusal does

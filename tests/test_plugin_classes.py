@@ -115,7 +115,11 @@ class AcmeNews(PublisherPlugin):
 
 
 def test_what_a_plugin_is():
+    from liminal_lib.sources.registry import IntegratorPlugin, PlatformPlugin
+
     assert AcmeFeed.KIND == "feed" == Provider.KIND and AcmeNews.KIND == "publisher" == Publisher.KIND
+    assert AcmeFeed.SYSTEM == "integrator" == AcmeNews.SYSTEM and issubclass(AcmeFeed, IntegratorPlugin)
+    assert PlatformPlugin.SYSTEM == "platform" and not issubclass(PlatformPlugin, IntegratorPlugin)
     assert not AcmeFeed().is_record and acme_record().is_record
     assert FeedPlugin.CONTRACT and "CONTRACT" not in AcmeFeed.__dict__  # the contract's own classes carry the defaults
     assert repr(AcmeFeed()) == "<AcmeFeed 'acme': built in>"

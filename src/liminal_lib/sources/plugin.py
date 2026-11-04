@@ -3,7 +3,12 @@
 A plugin is an instance of a subclass of `Plugin`: a feed's (`FeedPlugin`: bars, trades, reference
 data, its own fetching), a publisher's (`PublisherPlugin`, sources/publisher.py: news, releases,
 rates, datasets) or an assistant's (`AssistantPlugin`, assistants/plugin.py: an AI vendor's API,
-evaluating arguments). What a plugin declares is a class attribute (`name`, `title`, `assets`,
+evaluating arguments). Each plugs into one of Liminal's systems, and its abstract base names it
+(the user, 2026-11-03: "each of those plugins has an abstract base class, based on the system they
+plug in to"): `IntegratorPlugin`, the stock-data plugins' (feeds and publishers: "all plugins that
+work with integrator are ones that connect to get stock data"), and `PlatformPlugin`, the AI
+plugins' ("all the plugins that work with platform are ai"; the platform reports the machine and is
+the nexus of the systems' IPC). What a plugin declares is a class attribute (`name`, `title`, `assets`,
 `keys` ...); what it does is a method overriding the contract's default (`build`, `view`, `scan`,
 `settings` ...): the hooks. The registry (sources/registry.py) finds an instance (`PLUGIN`,
 `PLUGINS`, `PUBLISHER`, `PUBLISHERS`, `ASSISTANT`, `ASSISTANTS` in a module, or the entry point
@@ -135,6 +140,7 @@ class Plugin:
 
     CONTRACT = True  # on the contract's own classes only (gives): their hook methods are the defaults
     KIND = ""  # feed | publisher | assistant
+    SYSTEM = ""  # the system it plugs into: integrator (the stock-data plugins) | platform (the AI plugins)
     is_record = False  # the record form (Provider, Publisher): a dataclass, the hooks as callback fields
 
     name: str = ""  # its name everywhere: its database file, the watchlist, the ledgers, its settings
@@ -250,7 +256,25 @@ class Plugin:
         return databases_refused(self.databases)
 
 
-class FeedPlugin(Plugin):
+class IntegratorPlugin(Plugin):
+    """The abstract base of the plugins that plug into the integrator: the ones that connect to get
+    stock data (a feed's bars, trades and reference data; a publisher's news, releases, rates and
+    datasets), fetched by the integrator's runs and read back through its requests."""
+
+    CONTRACT = True
+    SYSTEM = "integrator"
+
+
+class PlatformPlugin(Plugin):
+    """The abstract base of the plugins that plug into the platform: the AI assistants, through which
+    the platform (the machine's information, the systems' IPC nexus) and the apps on it evaluate
+    arguments (assistants/plugin.py: AssistantPlugin)."""
+
+    CONTRACT = True
+    SYSTEM = "platform"
+
+
+class FeedPlugin(IntegratorPlugin):
     """A feed's plugin: everything the app needs to know about a data provider (sources/registry.py
     says what for). Its hooks, each with the contract's default here: `build` (its DataSource),
     `view` (its plan and caps), `rate` (the window its limiter keeps), `has_keys`, `serves`,
