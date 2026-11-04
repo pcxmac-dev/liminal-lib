@@ -22,7 +22,7 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier, asset_tier
 from .errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .coverage import (STEP_MS, FeedProfile, day_start_ms, frame_parts, frontier_ms, has_open_time, ms, plan,
+from .coverage import (STEP_MS, FeedProfile, Planner, day_start_ms, frame_parts, frontier_ms, has_open_time, ms,
                        same_market, second_floor)
 from .models import is_foreign, listing_ticker
 from .sources import is_archive, providers
@@ -291,9 +291,10 @@ def retired_end(item: dict) -> datetime | None:
 
 def _plan(store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str, timespan: str,
           floor: date, now: datetime, listed_from: date | None = None, stop: datetime | None = None,
-          exchange: str | None = None) -> list[tuple[int, int]]:
-    """coverage.plan, ended at `stop` (a retired symbol's end, retired_end): nothing after it is asked for."""
-    gaps = plan(store, me, feeds, ticker, asset, timespan, floor, now, listed_from, exchange)
+          exchange: str | None = None, planner: Planner | None = None) -> list[tuple[int, int]]:
+    """coverage.plan, ended at `stop` (a retired symbol's end, retired_end): nothing after it is asked for.
+    `planner`: the pass's (one Planner reads the scores, the scheme and a ticker's watch rows once)."""
+    gaps = (planner or Planner(store, feeds, now)).plan(me, ticker, asset, timespan, floor, listed_from, exchange)
     if stop is None:
         return gaps
     cut, step = ms(stop), STEP_MS.get(timespan, 60_000)
@@ -888,7 +889,7 @@ def gives_days(source: DataSource, me: FeedProfile, asset: str = "stock") -> boo
 
 
 def _archive_gap(source: DataSource, store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], item: dict,
-                 floor: date, now: datetime) -> bool | None:
+                 floor: date, now: datetime, planner: Planner | None = None) -> bool | None:
     """Whether a closed feed has history to fill for a stock: spans from its listing date that no
     better-placed feed can serve (coverage.plan). None while no feed has checked its listing: a
     reused symbol's earlier issuer must not be filled, so it waits."""
@@ -898,7 +899,8 @@ def _archive_gap(source: DataSource, store: Store, me: FeedProfile, feeds: dict[
     if not listed and not (is_foreign(item.get("exchange")) and all(is_archive(w["source"]) for w in rows)):
         return None  # a listing outside the US on archives alone fills from the floor: no US feed will date it
     start = max(floor, listed) if listed else floor
-    return any(_plan(store, me, feeds, ticker, "stock", ts, start, now, listed, retired_end(item), item.get("exchange"))
+    return any(_plan(store, me, feeds, ticker, "stock", ts, start, now, listed, retired_end(item), item.get("exchange"),
+                     planner=planner)
                for ts in dict.fromkeys((*source.resolutions("stock"), *(("day",) if gives_days(source, me) else ()))))
 
 
@@ -922,6 +924,7 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
     from . import killswitch
 
     today, done, stopped, server_fails = now.date(), 0, None, 0
+    planner = Planner(store, feeds, now)  # the sweep's: the scores and the scheme read once for every stock
     for item in todo:
         if done >= limit:
             break
@@ -932,7 +935,7 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
         if refusals.paused(ticker, now):
             continue
         if not _plan(store, me, feeds, ticker, "stock", "day", max(floor, listed) if listed else floor, now, listed,
-                     retired_end(item), item.get("exchange")):
+                     retired_end(item), item.get("exchange"), planner=planner):
             continue  # another feed is better placed for it, or nothing is left: nothing asked here
         try:
             listing = check_listing(source, store, item, today, log)
@@ -1575,6 +1578,7 @@ class Collector:
         refusals, queue, result = self.refusals, self.queue, self.result
         at = at or self.clock()
         ticker, asset = item["ticker"], item["asset"]
+        planner = Planner(store, feeds, now)  # this step's: the scores and the scheme read once
         synced = item.get("synced_at")
         if only is not None and ticker not in only:
             return False
@@ -1589,7 +1593,7 @@ class Collector:
             log(f"{ticker}: {source.name} has no history for it; closed")
             return False
         if archival and asset == "stock":  # a month's place only for history it can fill
-            gap = _archive_gap(source, store, me, feeds, item, self.floors[asset], now)
+            gap = _archive_gap(source, store, me, feeds, item, self.floors[asset], now, planner=planner)
             if gap is None:
                 self.unlisted += 1
                 return False
@@ -1730,7 +1734,9 @@ class Collector:
         _derive_symbol(store, source.name, ticker, asset, log)  # bad data checked first (baddata.py)
         if archival:
             spans = [resolution] if resolution == "day" else [resolution, "day"]
-            if not any(_plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from, stop, exchange)
+            planner.forget(ticker)  # its resolution found, its row changed: read again
+            if not any(_plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from, stop, exchange,
+                             planner=planner)
                        for ts in spans):
                 store.set_closed(source.name, ticker, now)
                 log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
@@ -2226,6 +2232,7 @@ def scan(
     name = source.name if source else source_name or "massive"
     result = ScanResult()
     probes = 0
+    planner = Planner(store, feeds or {}, now)  # the scan's: the scores and the scheme read once
     for item in store.watchlist(name):
         if only is not None and item["ticker"] not in only:
             continue
@@ -2236,9 +2243,9 @@ def scan(
         if a["state"] != "behind" or source is None or not ask:
             continue
         if feeds and source.name in feeds and item["asset"] != "future" and item["resolution"] != "trades":
-            if not source.serves(item["asset"]) or not plan(
-                    store, feeds[source.name], feeds, item["ticker"], item["asset"], "minute",
-                    history_floor(tier, now.date(), item["asset"]), now, item.get("listed_from")):
+            if not source.serves(item["asset"]) or not planner.plan(
+                    feeds[source.name], item["ticker"], item["asset"], "minute",
+                    history_floor(tier, now.date(), item["asset"]), item.get("listed_from")):
                 row["new"] = False  # nothing this feed should fetch: another feed holds or will serve it
                 continue
         if probes >= probe_limit:
