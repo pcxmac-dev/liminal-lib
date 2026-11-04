@@ -80,10 +80,15 @@ own plan information with its capability scan.
   local pipe (named for the host and the database, this user's key on both ends). The hosts are the
   fetcher (one per database), each feed's run (`feed-<name>`), the closed months' copy to DuckDB, the
   live recorder and the keeper of the MongoDB server. A host nobody holds ends after its idle time.
-- The charts app's front attaches to the fetcher when a page comes (starting one if none answers) and
-  proxies its pages' data requests to the fetcher's data API (port 8785 by default). The integrator's
-  service keeps the fetcher's own page there from your logon; `--daemon` holds the fetcher for good
-  so it collects on its own. Several integrators can run at once (`--name`), each on its own database
+- Two listeners on the machine (the user, 2026-11-03: "for the webserver / ports, i just integrator,
+  and charts"): the integrator's process serves its page and the data API at port 8785
+  (LIMINAL_FETCHER_PORT; the charts app's `serve_integrator`, reading the data itself) and holds the
+  fetcher host over the pipe while a page is in touch (started if none answers, let go when quiet);
+  the fetcher host has no HTTP of its own. The charts app's front at 8765 serves the chart page and
+  proxies its pages' data requests to the integrator's port, starting the integrator's server for
+  itself (`liminal-integrator serve --no-browser --until-quiet`) when nothing answers there. The
+  integrator's service keeps its page there from your logon; `--daemon` holds the fetcher for good so
+  it collects on its own. Several integrators can run at once (`--name`), each on its own database
   and port; a key's machine-wide ledger is shared by key, whichever integrator spends it.
 - An AI evaluation runs in the caller's process over HTTPS and is recorded in the main file's
   `evaluations` table; nothing is sent from an offline copy.
