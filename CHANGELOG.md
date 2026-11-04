@@ -21,6 +21,25 @@ exchange's plan and caps, `CRYPTO_VENUE_DAYS`). `Scanned`, `Report`, `Limits`, `
 `minute_window`, `within`, `server_limits`, `server_per_minute` moved to `sources/plugin.py`, still
 imported from the registry.
 
+The AI assistant kind, `liminal_lib.assistants` (the user: three AI plugins "that have a vanilla API, are
+compliant with the rest of the plugin structure ... but allow interfacing with Claude, Grock and ChatGPT
+Codex via API key, an email / account name", "used to evaluate certain standardized arguments from other
+plugins or apps", "extensible, and allow for higher order evaluation"). `AssistantPlugin` (`assistants/plugin.py`:
+a vendor's plans, models, prices and source pages written in and dated; its keys `<NAME>_API_KEY` and
+`<NAME>_ACCOUNT`, its plan variables and caps derived; its settings an `AssistantSettings`); `Assistant`
+(`assistants/assistant.py`: `models()`, `evaluate(argument)`, `connect()`, the vendor hooks; `ResponsesAssistant`
+for the OpenAI-shaped Responses API; `AssistantClient` on the contract's client, every error scrubbed of the key
+and the account); the arguments (`assistants/arguments.py`: `Question`, `Judge`, `ContextItem`, `Answer`, a kind
+registry for a plugin's own); `Evaluation` and `Usage` (`assistants/evaluation.py`), kept in the main file's
+`evaluations` table (`storage/evaluations.py`); `assistants.evaluate`, `evaluate_all`, `judge`,
+`default_assistant` (`LIMINAL_ASSISTANT`); `assistants/context.py` (context items from headlines, assessments,
+reports, evaluations); `assistants/verify.py` (the vendor pages read again: a plugin's weekly CI test). The
+registry's third kind (`assistants()`, `assistant_menu`, `ASSISTANT(S)` in a module), `config.load_settings` for
+it, `sourcing.detected_plans` with its scans. `HttpClient.post` (no transport retry: an answer may have been
+billed), a subclass's `_refusal` and `_final`, `limit_prefixes`; `MachineLedger.take_day(n)` and `charge_day`.
+Nothing is sent from an offline copy; the caps are per machine (50 requests, 200,000 tokens a day, 1,024
+output tokens, the cheapest model), raised on the Plugins view.
+
 ## 1.2.4 (2026-11-03)
 
 1.2.3's `same_market` undone: two feeds naming no market for an asset class count as one market again (the

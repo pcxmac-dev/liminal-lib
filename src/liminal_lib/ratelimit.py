@@ -220,8 +220,8 @@ class MachineLedger:
 
         return self._in_transaction(change)
 
-    def take_day(self, cap: int, now: datetime | None = None) -> bool:
-        """Count one request on today's (UTC) count, unless it has reached `cap`: whether the
+    def take_day(self, cap: int, now: datetime | None = None, n: int = 1) -> bool:
+        """Count one request (or `n`) on today's (UTC) count, unless it has reached `cap`: whether the
         request may go."""
         now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         day = now.date().isoformat()
@@ -230,12 +230,25 @@ class MachineLedger:
             row = conn.execute("SELECT n FROM days WHERE name=? AND day=?", (self.name, day)).fetchone()
             if row and row[0] >= cap:
                 return False
-            conn.execute("INSERT INTO days VALUES (?, ?, 1) ON CONFLICT (name, day) DO UPDATE SET n = n + 1",
-                         (self.name, day))
+            conn.execute("INSERT INTO days VALUES (?, ?, ?) ON CONFLICT (name, day) DO UPDATE SET n = n + ?",
+                         (self.name, day, n, n))
             conn.execute("DELETE FROM days WHERE day < ?", ((now - timedelta(days=DAYS_KEPT)).date().isoformat(),))
             return True
 
         return self._in_transaction(take)
+
+    def charge_day(self, n: int, now: datetime | None = None) -> int:
+        """Add `n` to today's (UTC) count whatever the cap (what an answer cost in tokens, known only
+        once it came: the AI assistants' token ledgers): the count after."""
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        day = now.date().isoformat()
+
+        def charge(conn) -> int:
+            conn.execute("INSERT INTO days VALUES (?, ?, ?) ON CONFLICT (name, day) DO UPDATE SET n = n + ?",
+                         (self.name, day, n, n))
+            return conn.execute("SELECT n FROM days WHERE name=? AND day=?", (self.name, day)).fetchone()[0]
+
+        return self._in_transaction(charge)
 
     def take_symbol(self, symbol: str, cap: int, now: datetime | None = None) -> bool:
         """Whether `symbol` may be asked for this month (UTC) under a plan's cap of different symbols

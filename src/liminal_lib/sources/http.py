@@ -1,7 +1,9 @@
 """The HTTP client every provider plugin's client builds on (plugin API 1.6): what each request is held
 to whoever the provider is (its window, the request cap, the machine's daily cap, pauses, retries
 with the server's Retry-After, a key never sent to another host), and its keyless form for the public
-feeds (PublicClient, which identifies itself)."""
+feeds (PublicClient, which identifies itself). 2.0: POST too (the AI assistants' answers: never sent
+again after a transport failure, since a timed-out answer may have been billed), a subclass's own
+error mapping (`_refusal`) and what is final (`_final`), and rate-limit headers kept by prefix."""
 from __future__ import annotations
 
 import email.utils
@@ -84,9 +86,11 @@ class HttpClient:
         # Asked as each request goes, counting it: False once the machine's requests on this key
         # today have reached the daily cap (every database on the machine counts: MachineLedger).
         self.take_day: Callable[[], bool] | None = None
-        # The rate-limit headers its server last sent (LIMIT_HEADERS): the capability scan checks
-        # the rate kept against them (Provider.run_scan).
+        # The rate-limit headers its server last sent (LIMIT_HEADERS, and any starting with one of
+        # `limit_prefixes`: the AI vendors' own): the capability scan checks the rate kept against them.
         self.limits_seen: dict[str, str] = {}
+        self.limit_prefixes: tuple[str, ...] = ()
+        self.last_headers: dict[str, str] = {}  # the last answer's headers (a request id among them)
 
     def tighten(self, n: int | None, seconds: float) -> bool:
         """Keep a tighter window from now on (a capability scan found its server's lower limit while
@@ -110,7 +114,16 @@ class HttpClient:
         resp = self._request(url, None)
         return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
 
-    def _request(self, path_or_url: str, params: dict[str, Any] | None) -> requests.Response:
+    def post(self, path_or_url: str, json: dict | None = None, params: dict[str, Any] | None = None) -> dict:
+        """A POST's JSON answer (2.0). Counts as a request; not sent again after a transport failure."""
+        resp = self._request(path_or_url, params, method="POST", json=json)
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise SourceError(resp.status_code, f"not JSON: {e}") from e
+
+    def _request(self, path_or_url: str, params: dict[str, Any] | None, *, method: str = "GET",
+                 json: dict | None = None) -> requests.Response:
         if path_or_url.startswith("http"):
             # Only follow pagination links on the API host, so the key is never sent elsewhere.
             if urlparse(path_or_url).netloc != self._host:
@@ -139,7 +152,10 @@ class HttpClient:
             if self.on_request:
                 self.on_request(self.requests_made)
             try:
-                resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
+                if method == "POST":
+                    resp = self._session.post(url, params=params, json=json, headers=self._headers, timeout=self._timeout)
+                else:
+                    resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
             except (requests.exceptions.InvalidHeader, requests.exceptions.InvalidURL):
                 # A key with a space or a line break in it: nothing can be sent, ever, and the error
                 # repeats the header (the key) word for word, which went to the log and the kill's
@@ -147,7 +163,7 @@ class HttpClient:
                 raise Unauthorized(0, "a key or address this feed sends holds a space, a line break or another "
                                       "character a request cannot carry: check its variable's value") from None
             except requests.RequestException as e:  # no answer (network down, a timeout): tried again like a 5xx
-                if attempt == self._max_retries:
+                if attempt == self._max_retries or method == "POST":  # a POST is not sent again: it may have been billed
                     raise SourceError(0, f"no answer: {type(e).__name__}: {e}") from e
                 delay = retry_delay(None, attempt)
                 if self.on_retry:
@@ -156,7 +172,10 @@ class HttpClient:
                 continue
             sent = getattr(resp, "headers", None) or {}
             self.limits_seen.update({h: str(sent[h]) for h in LIMIT_HEADERS if sent.get(h)})
-            retryable = resp.status_code == 429 or resp.status_code >= 500
+            if self.limit_prefixes:
+                self.limits_seen.update({str(h): str(v) for h, v in sent.items() if str(h).lower().startswith(self.limit_prefixes)})
+            self.last_headers = {str(h): str(v) for h, v in sent.items()}
+            retryable = (resp.status_code == 429 or resp.status_code >= 500) and not self._final(resp)
             if not retryable or attempt == self._max_retries:
                 break
             delay = retry_delay(resp, attempt)
@@ -171,6 +190,11 @@ class HttpClient:
             raise SourceError(resp.status_code, f"redirected to {where}; not followed (the key stays on {host})")
         if resp.status_code >= 400:
             message = error_message(resp)
+            mapped = self._refusal(resp, message)  # a subclass's own reading of the vendor's error shape
+            if mapped is not None:
+                if isinstance(mapped, Unauthorized):
+                    self._refused[host] = mapped
+                raise mapped
             if resp.status_code == 401:  # the key itself: the run stops and the feed is killed, not symbol by symbol
                 self._refused[host] = self._unauthorized(host, message)
                 raise self._refused[host]
@@ -185,6 +209,16 @@ class HttpClient:
     def _unauthorized(self, host: str, message: str) -> SourceError:
         """The error a 401 from `host` is (and stays for the rest of the run)."""
         return Unauthorized(401, message)
+
+    def _refusal(self, resp: requests.Response, message: str) -> SourceError | None:
+        """The error a refused answer is, by a vendor's own shape (2.0; a subclass's); None: the
+        defaults by status."""
+        return None
+
+    def _final(self, resp: requests.Response) -> bool:
+        """Whether a 429 or 5xx is final (a quota, a spend cap: trying again changes nothing), so it
+        is not tried again (2.0; a subclass's)."""
+        return False
 
     def _wait(self, seconds: float) -> None:
         """Wait before trying again. With a pause to honour (should_stop), in slices of WAIT_SLICE,

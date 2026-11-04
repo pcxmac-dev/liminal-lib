@@ -363,6 +363,31 @@ CREATE TABLE IF NOT EXISTS fetch_requests (  -- what the fetcher was asked for, 
     pid         INTEGER                    -- the fetcher working on it
 );
 CREATE INDEX IF NOT EXISTS fetch_requests_state ON fetch_requests (state, symbol);
+CREATE TABLE IF NOT EXISTS evaluations (  -- the AI assistants' answers to arguments (storage/evaluations.py)
+    id              TEXT PRIMARY KEY,
+    at              TEXT NOT NULL,          -- ISO, UTC
+    assistant       TEXT NOT NULL,          -- the plugin: claude, grok, codex
+    provider        TEXT NOT NULL,          -- the vendor
+    model           TEXT NOT NULL,
+    kind            TEXT NOT NULL,          -- the argument's kind: question, judge ...
+    argument_id     TEXT NOT NULL,
+    argument        TEXT,                   -- the argument as given (JSON), its context items' ids with it
+    inputs          TEXT,                   -- the evaluation ids it built on (JSON)
+    text            TEXT,
+    verdict         TEXT,
+    fields          TEXT,                   -- the JSON fields parsed from the answer
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cached_tokens   INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd        REAL,
+    seconds         REAL,
+    request_id      TEXT,
+    stop            TEXT NOT NULL,          -- end_turn | length | refusal | error
+    error           TEXT
+);
+CREATE INDEX IF NOT EXISTS evaluations_by_assistant ON evaluations (assistant, at);
+CREATE INDEX IF NOT EXISTS evaluations_by_argument ON evaluations (argument_id);
 """
 
 # Columns added after the first release: (table, column, type). Applied to older databases on open.

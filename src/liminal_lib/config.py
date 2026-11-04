@@ -145,6 +145,9 @@ class Settings:
     chart_cache_mb: int = 1024
     # FUTURES_PER_RUN: the futures' share of a run (collector.FUTURES_PER_RUN).
     futures_per_run: int = 100
+    # LIMINAL_ASSISTANT: the AI assistant plugin an evaluation goes to when none is named (2.0;
+    # assistants.default_assistant: else the first set up)
+    assistant: str | None = None
     # LIMINAL_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
     # scratch database must never spend the real plan's requests: its own ledger would not know them).
     offline: bool = False
@@ -287,10 +290,10 @@ def load_settings(
     for name in RENAMED:  # the app's settings under their old names
         if name not in merged and (old := renamed(merged, name)) is not None:
             merged[name] = old
-    from .sources.registry import leave_out, providers, publishers  # when called, not on import: the registry imports the plugins
+    from .sources.registry import assistants, leave_out, providers, publishers  # when called, not on import: the registry imports the plugins
 
     plugins = {}  # the plugins' own settings (API 1.11; 2.0: every kind's), by plugin
-    for name, p in [*providers().items(), *publishers().items()]:
+    for name, p in [*providers().items(), *publishers().items(), *assistants().items()]:
         if not p.has_settings:
             continue
         try:
@@ -327,6 +330,7 @@ def load_settings(
         bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
         chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
         futures_per_run=_default(_int_setting(merged, "FUTURES_PER_RUN"), 100),
+        assistant=(merged.get("LIMINAL_ASSISTANT") or "").strip().lower() or None,
         env={n: merged[n] for n in variables() if merged.get(n)},
         variables=dict(merged),
     )

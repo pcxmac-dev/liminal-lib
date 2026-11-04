@@ -237,12 +237,13 @@ def standing(store, feeds: dict[str, FeedProfile], now: datetime | None = None) 
 # -- the plans the providers' scans found (each plugin refreshes its own plan info) -----------------
 
 def detected_plans(scans: dict) -> dict[str, str]:
-    """{plan variable: value} from the providers' last capability scans ({name: kv SCAN_KEY}), each
-    plugin's own plan variables only, in the providers' order (registry.Provider.run_scan)."""
-    from .sources import providers
+    """{plan variable: value} from the providers' and the assistants' last capability scans ({name:
+    kv SCAN_KEY}), each plugin's own plan variables only, in the plugins' order (FeedPlugin.run_scan,
+    an assistant's Connect)."""
+    from .sources.registry import assistants, providers
 
     out: dict[str, str] = {}
-    for name, p in providers().items():
+    for name, p in [*providers().items(), *assistants().items()]:
         plan = ((scans or {}).get(name) or {}).get("plan") or {}
         for var, value in plan.items():
             if var in p.plan_vars and value and var not in out:

@@ -306,6 +306,7 @@ def scan_limits(db_path, name: str) -> list[tuple[float, float]]:
 _lock = threading.RLock()
 _providers: dict[str, FeedPlugin] | None = None
 _publishers: dict[str, PublisherPlugin] = {}
+_assistants: dict[str, "AssistantPlugin"] = {}  # the AI assistants (2.0; assistants/plugin.py)
 _errors: list[tuple[str, str]] = []
 
 NAMES = ("PLUGIN", "PUBLISHER", "ASSISTANT")  # what a module calls its plugin (the plural: several)
@@ -422,10 +423,25 @@ def discover() -> tuple[dict[str, FeedPlugin], list[tuple[str, str]]]:
 
 
 def discover_all() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], list[tuple[str, str]]]:
-    """The providers and the publishers (both by name, in their order), and the plugins left out:
-    one that fails to load, one written for a contract this app does not offer (api_refusal), a
-    second of one name."""
+    """The providers and the publishers (both by name, in their order), and the plugins left out
+    (discover_everything, without the assistants)."""
+    found, pubs, _, errors_ = discover_everything()
+    return found, pubs, errors_
+
+
+def _kind(p: Plugin) -> str:
+    from ..assistants.plugin import AssistantPlugin  # when asked, not on import: the assistants import the client
+
+    return "publisher" if isinstance(p, PublisherPlugin) else "assistant" if isinstance(p, AssistantPlugin) else "provider"
+
+
+def discover_everything() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], dict[str, "AssistantPlugin"],
+                                   list[tuple[str, str]]]:
+    """The providers, the publishers and the assistants (each by name, in their order), and the
+    plugins left out: one that fails to load, one written for a contract this app does not offer
+    (api_refusal), a second of one name."""
     from . import plugins
+    from ..assistants.plugin import AssistantPlugin
 
     found: list[Plugin] = []
     errors: list[tuple[str, str]] = []
@@ -441,6 +457,7 @@ def discover_all() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], l
               version, found, errors)
     out: dict[str, FeedPlugin] = {}
     pubs: dict[str, PublisherPlugin] = {}
+    assts: dict[str, AssistantPlugin] = {}
     keys: dict[str, str] = {}  # a feed's key -> its publisher (keys name the state kept)
     sets: dict[str, str] = {}  # a dataset's name -> its publisher (names its state and versions)
     lives: dict[str, str] = {}  # a live feed's name -> its provider (names its bars, status and kills)
@@ -448,16 +465,14 @@ def discover_all() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], l
     # the built-ins first, so an installed package never takes the name, a feed or a dataset of one
     # (whatever its order); all listed in their order after
     for p in sorted(found, key=lambda p: (p.origin != "built in", p.order, p.name)):
-        mine = pubs if isinstance(p, PublisherPlugin) else out
-        if p.name in out or p.name in pubs:
-            first = (out.get(p.name) or pubs[p.name]).origin
-            kind = "publisher" if isinstance(p, PublisherPlugin) else "provider"
-            errors.append((p.origin, f"a second {kind} named {p.name!r}: the first kept ({first})"))
+        mine = pubs if isinstance(p, PublisherPlugin) else assts if isinstance(p, AssistantPlugin) else out
+        if p.name in out or p.name in pubs or p.name in assts:
+            first = (out.get(p.name) or pubs.get(p.name) or assts[p.name]).origin
+            errors.append((p.origin, f"a second {_kind(p)} named {p.name!r}: the first kept ({first})"))
             continue
         why = p.refusal()
         if why:
-            kind = "publisher" if isinstance(p, PublisherPlugin) else "provider"
-            errors.append((p.origin, f"{kind} {p.name!r}: {why}"))
+            errors.append((p.origin, f"{_kind(p)} {p.name!r}: {why}"))
             continue
         if isinstance(p, PublisherPlugin):
             clash = next((f.key for f in p.feeds if f.key in keys), None)
@@ -475,6 +490,8 @@ def discover_all() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], l
             keys.update({f.key: p.name for f in p.feeds})
             sets.update({d.name: p.name for d in p.declared})
             files.update({d.provider: p.name for d in p.declared})
+        elif isinstance(p, AssistantPlugin):
+            pass  # an assistant has no feeds, datasets or live feeds to clash
         else:
             # a live feed's name is its own provider's, or a name no other provider has
             clash = next((x.name for x in p.live if lives.get(x.name, p.name) != p.name
@@ -489,7 +506,7 @@ def discover_all() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], l
     for p in out.values():
         DELAYS.declare(p)  # its own publication delays and market hours (2.0)
     in_order = lambda d: dict(sorted(d.items(), key=lambda kv: (kv[1].order, kv[0])))  # noqa: E731
-    return in_order(out), in_order(pubs), errors
+    return in_order(out), in_order(pubs), in_order(assts), errors
 
 
 _databases_refused = databases_refused  # its name before 2.0 (sources/plugin.py: Plugin.refusal)
@@ -500,9 +517,11 @@ def providers() -> dict[str, FeedPlugin]:
     global _providers
     with _lock:
         if _providers is None:
-            _providers, found, found_errors = discover_all()
+            _providers, found, found_assistants, found_errors = discover_everything()
             _publishers.clear()
             _publishers.update(found)
+            _assistants.clear()
+            _assistants.update(found_assistants)
             _errors[:] = found_errors
         return _providers
 
@@ -512,6 +531,17 @@ def publishers() -> dict[str, PublisherPlugin]:
     with _lock:
         providers()
         return dict(_publishers)
+
+
+def assistants() -> dict[str, "AssistantPlugin"]:
+    """The AI assistant plugins by name, in their order (found with the providers; 2.0)."""
+    with _lock:
+        providers()
+        return dict(_assistants)
+
+
+def assistant(name: str) -> "AssistantPlugin | None":
+    return assistants().get(name)
 
 
 def publisher_of(name: str) -> str:
@@ -535,7 +565,10 @@ def publisher_parts(name: str) -> list[str]:
 
 def plugin_keys(name: str) -> list[KeyVar]:
     """Every variable a plugin reads that the user sets: a feed plugin's keys with its feeds' and its
-    publishers' (each once, by name), or a publisher's with its parts' (Federal: the SEC's GOV_CONTACT)."""
+    publishers' (each once, by name), a publisher's with its parts' (Federal: the SEC's GOV_CONTACT),
+    an assistant's (its key and its account)."""
+    if name in assistants():
+        return list(assistants()[name].keys)
     pubs = publishers()
     if name in pubs:
         found = [k for n in (name, *publisher_parts(name)) for k in pubs[n].keys]
@@ -561,13 +594,14 @@ def leave_out(name: str, why: str) -> None:
     left out as one that fails to load is: it and the feeds part of it go from providers(), its
     publishers (itself, when it is one) from publishers(), and the cause into errors()."""
     with _lock:
-        p = providers().get(name) or _publishers.get(name)
+        p = providers().get(name) or _publishers.get(name) or _assistants.get(name)
         if p is None:
             return
         for feed in plugin_feeds(name):
             _providers.pop(feed, None)
         for pub in [n for n, q in _publishers.items() if name in (n, q.part_of, q.account)]:
             _publishers.pop(pub)
+        _assistants.pop(name, None)
         _errors.append((p.origin, f"{name}: {why}"))
 
 
@@ -614,6 +648,9 @@ def plugin_databases(name: str) -> list[Database]:
     writes (`databases`), and its rows in the main file. A feed plugin's include its feeds' and
     publishers' (Massive: its headlines); a publisher's, its parts' (Federal: its agencies'); a part's,
     its own. The user, 2026-10-31: "the plugin will point to the databases it stores the data in"."""
+    if name in assistants():  # an assistant's answers: the main file's evaluations (2.0)
+        return [Database(layout.MAIN, "its evaluations: the evaluations table (every answer, its argument, what it cost)",
+                         shared=True)]
     ps, pubs = providers(), publishers()
     found: list[Database] = []
     main: list[str] = []
@@ -695,10 +732,12 @@ def errors() -> list[tuple[str, str]]:
 
 
 def variables() -> tuple[str, ...]:
-    """Every variable a plugin reads (a provider's keys, plans and options; a publisher's keys), for
-    Settings.env and the saved user variables (config.saved_names)."""
+    """Every variable a plugin reads (a provider's keys, plans and options; a publisher's keys; an
+    assistant's key, account, plan and caps), for Settings.env and the saved user variables
+    (config.saved_names)."""
     return tuple(dict.fromkeys([*(n for p in providers().values() for n in (*p.key_names, *p.plan_vars, *p.options)),
-                                *(n for p in publishers().values() for k in p.keys for n in k.names)]))
+                                *(n for p in publishers().values() for k in p.keys for n in k.names),
+                                *(n for p in assistants().values() for n in (*p.key_names, *p.plan_vars, *p.options))]))
 
 
 def key_row(k: KeyVar, settings: "Settings | None" = None) -> dict:
@@ -770,3 +809,24 @@ def publisher_menu() -> list[dict]:
     return [{**_publisher_row(p), "keys": [key_row(k) for k in plugin_keys(p.name)],
              "parts": [_publisher_row(pubs[n]) for n in publisher_parts(p.name)]}
             for p in pubs.values() if publisher_of(p.name) == p.name]
+
+
+def assistant_menu(settings: "Settings | None" = None) -> list[dict]:
+    """The AI assistant plugins (2.0) for the key script, `plugins --json` and the Plugins view: each
+    with its keys (never a value, only whether set), its plan variables and their choices, its
+    written-in tables (plans, models, sources, the date verified) and, with settings, whether its
+    key is set, what it answers with and what its free plan means."""
+    out = []
+    for p in assistants().values():
+        row = {"name": p.name, "title": p.title, "about": p.about, "vendor": p.vendor, "signup": p.signup, "origin": p.origin,
+               "version": p.version, "api": p.api, "keys": [key_row(k, settings) for k in p.keys],
+               "planChoices": [{"name": v, "choices": list(c)} for v, c in p.plan_choices.items()], "planNote": p.plan_note,
+               "scan": p.has_scan, "tables": p.table_rows(), "databases": [database_row(d) for d in plugin_databases(p.name)]}
+        if settings is not None:
+            own = p.own(settings)
+            row.update(keysSet=p.keys_set(settings), serves=p.served(settings), plan=own.plan if own else None,
+                       model=own.model if own else None, planVars=p.plan_state(settings), freeNote=p.free_note(settings),
+                       caps={"requestsPerDay": own.caps.requests_per_day, "tokensPerDay": own.caps.tokens_per_day,
+                             "maxOutputTokens": own.caps.max_output_tokens} if own else None)
+        out.append(row)
+    return out
