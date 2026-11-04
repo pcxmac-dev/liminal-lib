@@ -222,82 +222,126 @@ def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner
 
 
 def _window(me: FeedProfile, asset: str, timespan: str, now: datetime) -> tuple[int, int]:
+    """What a feed can serve of an asset class's series now: its plan's history floor to its frontier."""
     from .collector import history_floor
 
     return day_start_ms(history_floor(me.tier, now.astimezone(ET).date(), asset)), frontier_ms(asset, me.tier, now, timespan)
 
 
+class Auditor:
+    """One feed's audits of the other feeds' data in a run (`run_audits`): the auditing feed (its
+    source and its profile `me`), the store, every configured feed's profile (same_market: only a
+    copy of the same market is audited), the run's time, its log and its random numbers; what the
+    feed watches read once (`mine`). `run` decides what is audited: the spans queued after their
+    downloads first, then random sessions of the others' stored history, each by one random hour
+    (spot), within the requests allowed; `span` audits one (audit_span: the download and the
+    comparison stay the module's functions); `random_span` picks a session this feed could serve;
+    `window` is what it can serve of a series now."""
+
+    def __init__(self, source, store, me: FeedProfile, feeds: dict[str, FeedProfile] | None, now: datetime, log=print,
+                 rng: random.Random | None = None):
+        self.source, self.store, self.me, self.now, self.log = source, store, me, now, log
+        self.feeds = feeds or {}
+        self.rng = rng or random.Random()
+        self._mine: dict[str, dict] | None = None
+
+    @property
+    def mine(self) -> dict[str, dict]:
+        """The auditing feed's watch rows by ticker, read once."""
+        if self._mine is None:
+            self._mine = {w["ticker"]: w for w in self.store.watchlist(self.source.name)}
+        return self._mine
+
+    def window(self, asset: str, timespan: str) -> tuple[int, int]:
+        """What this feed can serve of an asset class's series now (ms): floor to frontier."""
+        return _window(self.me, asset, timespan, self.now)
+
+    def span(self, ticker: str, timespan: str, a: int, b: int, owner: str, reason: str) -> dict | None:
+        """Audit [a, b) of a series `owner` holds with this feed (audit_span); the result, or None."""
+        return audit_span(self.source, self.store, ticker, timespan, a, b, owner, reason, self.log)
+
+    def run(self, queued: int = 2, random_count: int = 1, requests: int | None = None) -> int:
+        """Spot-audit other feeds' data with this feed: first spans queued after their downloads, then
+        random sessions of their stored history, each by one random hour (`spot`). Only spans this
+        feed can serve on its plan; with `requests`, no more audits once they have used that many.
+        Returns audits done."""
+        source, store, me, feeds, now, rng = self.source, self.store, self.me, self.feeds, self.now, self.rng
+        done = 0
+        start = source.requests_made
+        spent = lambda: requests is not None and source.requests_made - start >= requests  # noqa: E731
+        store.expire_audits(now - QUEUE_MAX_AGE)  # once, whatever this run audits (it was a row at a time, while done < queued)
+        for q in store.audit_queue(exclude_owner=me.name):
+            if done >= queued or spent():
+                break
+            w = self.mine.get(q["ticker"])
+            if w is None or not source.serves(w["asset"]) or is_foreign(w.get("exchange")):
+                continue  # (a listing abroad has no copy of its market here to audit it by)
+            from .coverage import same_market
+
+            if not same_market(feeds, q["owner"], me.name, w["asset"]):
+                continue  # another market: the composite compares it, an audit would not
+            lo, hi = self.window(w["asset"], q["timespan"])
+            if not (lo <= q["start_ms"] and q["end_ms"] <= hi):
+                continue  # not on this feed's plan yet (e.g. end of day): a later run
+            s0, s1 = spot(q["start_ms"], q["end_ms"], rng, q["timespan"])
+            self.span(q["ticker"], q["timespan"], s0, s1, q["owner"], "after-download")
+            store.dequeue_audit(q["ticker"], q["timespan"], q["start_ms"], q["owner"])
+            done += 1
+        for _ in range(random_count):
+            if spent():
+                break
+            pick = self.random_span(self.mine)
+            if pick:
+                ticker, timespan, s0, s1, owner = pick
+                self.span(ticker, timespan, *spot(s0, s1, rng, timespan), owner, "random")
+                done += 1
+        return done
+
+    def random_span(self, mine: dict | None = None):
+        """A random session of another feed's stored minute bars that this feed could serve, of the
+        same market (another exchange's data is compared by the composite, not audited as a copy):
+        (ticker, timespan, start, end, owner), or None. `mine`: the watch rows to pick from (this
+        feed's by default)."""
+        from .coverage import same_market
+
+        source, store, me, feeds, rng = self.source, self.store, self.me, self.feeds, self.rng
+        mine = mine or self.mine
+        candidates = []
+        for ticker, w in mine.items():
+            if w["asset"] == "future" or not source.serves(w["asset"]) or is_foreign(w.get("exchange")):
+                continue
+            lo, hi = self.window(w["asset"], "minute")
+            for owner, spans in store.coverage(ticker, "minute").items():
+                if owner == me.name or owner == "composite" or (feeds and not same_market(feeds, owner, me.name, w["asset"])):
+                    continue
+                for a, b in spans:
+                    a, b = max(a, lo), min(b, hi)
+                    if b - a >= 86_400_000:
+                        candidates.append((ticker, w["asset"], owner, a, b))
+        rng.shuffle(candidates)
+        for ticker, asset, owner, a, b in candidates[:20]:
+            for _ in range(10):
+                t = a + rng.random() * (b - a)
+                d = datetime.fromtimestamp(t / 1000, ET).date()
+                for s in freshness.CALENDAR.sessions(asset, d, d):
+                    s0, s1 = max(ms(s.open), a), min(ms(s.close), b)
+                    if s1 - s0 >= 3_600_000 and has_open_time(asset, s0, s1):
+                        return ticker, "minute", s0, s1, owner
+        return None
+
+
 def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], now: datetime,
                queued: int = 2, random_count: int = 1, log=print, rng: random.Random | None = None,
                requests: int | None = None) -> int:
-    """Spot-audit other feeds' data with this feed: first spans queued after their downloads, then
-    random sessions of their stored history, each by one random hour (`spot`). Only spans this
-    feed can serve on its plan; with `requests`, no more audits once they have used that many."""
-    rng = rng or random.Random()
-    mine = {w["ticker"]: w for w in store.watchlist(source.name)}
-    done = 0
-    start = source.requests_made
-    spent = lambda: requests is not None and source.requests_made - start >= requests  # noqa: E731
-    store.expire_audits(now - QUEUE_MAX_AGE)  # once, whatever this run audits (it was a row at a time, while done < queued)
-    for q in store.audit_queue(exclude_owner=me.name):
-        if done >= queued or spent():
-            break
-        w = mine.get(q["ticker"])
-        if w is None or not source.serves(w["asset"]) or is_foreign(w.get("exchange")):
-            continue  # (a listing abroad has no copy of its market here to audit it by)
-        from .coverage import same_market
-
-        if not same_market(feeds, q["owner"], me.name, w["asset"]):
-            continue  # another market: the composite compares it, an audit would not
-        lo, hi = _window(me, w["asset"], q["timespan"], now)
-        if not (lo <= q["start_ms"] and q["end_ms"] <= hi):
-            continue  # not on this feed's plan yet (e.g. end of day): a later run
-        s0, s1 = spot(q["start_ms"], q["end_ms"], rng, q["timespan"])
-        audit_span(source, store, q["ticker"], q["timespan"], s0, s1, q["owner"], "after-download", log)
-        store.dequeue_audit(q["ticker"], q["timespan"], q["start_ms"], q["owner"])
-        done += 1
-    for _ in range(random_count):
-        if spent():
-            break
-        pick = random_span(store, source, me, now, rng, mine, feeds)
-        if pick:
-            ticker, timespan, s0, s1, owner = pick
-            audit_span(source, store, ticker, timespan, *spot(s0, s1, rng, timespan), owner, "random", log)
-            done += 1
-    return done
+    """Spot-audit other feeds' data with this feed: Auditor(...).run(...) (its docstring)."""
+    return Auditor(source, store, me, feeds, now, log, rng).run(queued, random_count, requests)
 
 
 def random_span(store, source, me: FeedProfile, now: datetime, rng: random.Random, mine: dict | None = None,
                 feeds: dict | None = None):
-    """A random session of another feed's stored minute bars that this feed could serve, of the same
-    market (another exchange's data is compared by the composite, not audited as a copy):
-    (ticker, timespan, start, end, owner), or None."""
-    from .coverage import same_market
-
-    mine = mine or {w["ticker"]: w for w in store.watchlist(source.name)}
-    candidates = []
-    for ticker, w in mine.items():
-        if w["asset"] == "future" or not source.serves(w["asset"]) or is_foreign(w.get("exchange")):
-            continue
-        lo, hi = _window(me, w["asset"], "minute", now)
-        for owner, spans in store.coverage(ticker, "minute").items():
-            if owner == me.name or owner == "composite" or (feeds and not same_market(feeds, owner, me.name, w["asset"])):
-                continue
-            for a, b in spans:
-                a, b = max(a, lo), min(b, hi)
-                if b - a >= 86_400_000:
-                    candidates.append((ticker, w["asset"], owner, a, b))
-    rng.shuffle(candidates)
-    for ticker, asset, owner, a, b in candidates[:20]:
-        for _ in range(10):
-            t = a + rng.random() * (b - a)
-            d = datetime.fromtimestamp(t / 1000, ET).date()
-            for s in freshness.CALENDAR.sessions(asset, d, d):
-                s0, s1 = max(ms(s.open), a), min(ms(s.close), b)
-                if s1 - s0 >= 3_600_000 and has_open_time(asset, s0, s1):
-                    return ticker, "minute", s0, s1, owner
-    return None
-
+    """A random session of another feed's stored minute bars that this feed could serve:
+    Auditor(...).random_span(mine) (its docstring)."""
+    return Auditor(source, store, me, feeds, now, rng=rng).random_span(mine)
 
 def manual_day(store, ticker: str, day: date, asset: str) -> tuple[int, int] | None:
     """The session span of one day for `audit --day`."""

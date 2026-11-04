@@ -10,6 +10,8 @@ part-way loses nothing and the stored data always stays contiguous.
 """
 from __future__ import annotations
 
+import inspect
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
@@ -797,10 +799,46 @@ class Refusals:
             self._save()
 
 
-# Feeds whose plan limits how many different symbols a month may be asked for (their plugin's
-# `symbols_per_month`; Tiingo's free plan: 500, kept a little inside), taken in the watchlist's
-# order (the most traded first).
-SYMBOLS_PER_MONTH = {name: p.symbols_per_month for name, p in providers().items() if p.symbols_per_month}
+class _MonthlyCaps(MutableMapping):
+    """SYMBOLS_PER_MONTH: the feeds whose plan limits how many different symbols a month may be asked
+    for ({feed: cap}; their plugin's `symbols_per_month`: Tiingo's free plan, 500, kept a little
+    inside), taken in the watchlist's order (the most traded first). Read from the registry when
+    asked, not when this module loads (1.5.0: the plugins load when first needed, and one installed
+    or reloaded since shows). A cap set here (a test's monkeypatch.setitem) stands in for the
+    plugin's until it is deleted."""
+
+    def __init__(self) -> None:
+        self._set: dict[str, int] = {}
+
+    @staticmethod
+    def _declared() -> dict[str, int]:
+        return {name: p.symbols_per_month for name, p in providers().items() if p.symbols_per_month}
+
+    def __getitem__(self, name: str) -> int:
+        if name in self._set:
+            return self._set[name]
+        return self._declared()[name]
+
+    def __setitem__(self, name: str, cap: int) -> None:
+        if self._declared().get(name) == cap:
+            self._set.pop(name, None)  # the plugin's own: nothing stands in for it
+        else:
+            self._set[name] = cap
+
+    def __delitem__(self, name: str) -> None:
+        del self._set[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter({**self._declared(), **self._set})
+
+    def __len__(self) -> int:
+        return len({**self._declared(), **self._set})
+
+    def __repr__(self) -> str:
+        return repr(dict(self))
+
+
+SYMBOLS_PER_MONTH: MutableMapping[str, int] = _MonthlyCaps()
 
 
 def monthly_cap(source: DataSource) -> int | None:
@@ -1074,7 +1112,7 @@ def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime
 
 
 # -- the fetch queue (storage/queue.py): each symbol a run plans, takes and ends ---------------
-class _Queue:
+class RunQueue:
     """A bars run's rows on the fetch queue (the Fetcher shows it): each symbol it plans waiting, the
     one it fetches running, then done or failed. Kept beside the run, never its undoing: a queue
     write that fails is logged once and the run goes on."""
@@ -1120,6 +1158,9 @@ class _Queue:
         """The symbol taken last left without an end of its own (its listing, its resolution): done."""
         if self.current is not None:
             self.end(self.current, "done", detail=detail)
+
+
+_Queue = RunQueue  # its name before 1.5.0
 
 
 # -- the symbol open in the chart goes first ------------------------------------------------
@@ -1310,14 +1351,456 @@ def _next_item(pending: list[dict], store: Store, now: datetime, source: str = "
     return pending.pop(0), False
 
 
+class Collector:
+    """One scheduled run over a feed's watchlist (`sync`): the run's state and its decisions.
+
+    The state: the feed and its plan, the store, the time the run began and its clock (`clock`: a
+    run lasts hours), every configured feed's profile (one feed per span, coverage.py), the floor of
+    each asset class, the refusals, the fetch queue and the counts the summary reports. The stages:
+    `_before_symbols` (the exchanges, the calendars, the watched stocks' market days, the market
+    moves), `_plan_run` (the fetch order, the two passes, the daily-first sweep, the run's rows on
+    the queue), `_step` (one symbol: left alone, or fetched) and `_after_symbols` (the summary, the
+    audits, the directory). The loops over requests stay the module's functions (sync_bars, _fill,
+    sync_future, check_listing, daily_first, market_days, refresh_directory, fill_directory_icons,
+    ...), called through the module so a stand-in a test sets is the one used; the module's
+    constants (DAILY_FIRST_PER_RUN, FUTURES_PER_RUN, FUTURES_DAILY, `monotonic`) are read when a
+    stage runs, never bound here."""
+
+    def __init__(self, source: DataSource, store: Store, tier: Tier, *, now: datetime | None = None, log: Log = print,
+                 refresh_hours: float = 0.0, feeds: dict[str, FeedProfile] | None = None,
+                 audits: tuple[int, int] = (0, 0), futures_per_run: int | None = None,
+                 proxies: list[str] | None = None):
+        self.source, self.store, self.tier, self.log = source, store, tier, log
+        self.now = (now or now_et()).astimezone(ET)
+        self.today = self.now.date()
+        self.refresh_hours, self.audits, self.proxies = refresh_hours, audits, proxies
+        self.futures_per_run = futures_per_run  # None: FUTURES_PER_RUN, read when the run plans
+        self.feeds = dict(feeds or {})
+        self.me = self.feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
+        self.feeds[source.name] = self.me
+        self.archival = getattr(source, "archival", False)  # a closed feed: fills history once per symbol
+        # the run's arguments (run)
+        self.only: set[str] | None = None
+        self.published_only = False
+        self.on_item: Callable[[str], None] | None = None
+        self.directory_allowance: int | Callable[[], int] = 0
+        # the run's state (run, _plan_run)
+        self.started = 0.0
+        self.result = SyncResult()
+        self.floors: dict[str, date] = {}
+        self.waiting: dict[str, int] = {}
+        self.closed = self.capped = self.unlisted = 0
+        self.refusals: Refusals | None = None
+        self.watched: list[dict] = []
+        self.order: dict[str, int] = {}
+        self.filling = 0
+        self.served: dict = {}
+        self.sweep_left = 0
+        self.pending: list[dict] = []
+        self.queue: RunQueue | None = None
+        self.futures_spent = self.futures_left = 0
+        self.futures_daily: set[str] = set()
+        self.paused_updates: dict | None = None
+        self.held_back: int | None = None
+        self.picked: set[str] = set()
+        self.on_lists: set[str] = set()
+        self.server_fails = 0
+
+    def clock(self) -> datetime:
+        """The time now: a run lasts hours, and `now` is when it began."""
+        return self.now + timedelta(seconds=monotonic() - self.started)
+
+    def run(self, only: set[str] | None = None, published_only: bool = False,
+            on_item: Callable[[str], None] | None = None, directory_allowance: int | Callable[[], int] = 0) -> SyncResult:
+        """The run (`sync` says what the arguments do): the stages in order, each symbol in its
+        turn, stopped where the plan's cap or the server says so (StopRun). Returns what it saved,
+        what it left for later and where it stopped."""
+        source, store, log = self.source, self.store, self.log
+        self.only, self.published_only, self.on_item = only, published_only, on_item
+        self.directory_allowance = directory_allowance
+        self.started = monotonic()
+        self.today = self.now.date()
+        freshness.use_official(store)  # the official holidays fetched so far: what is published, and when
+        self.floors = {a: history_floor(self.tier, self.today, a) for a in ASSETS}  # each asset class on its own plan
+        self.result = SyncResult()
+        saved_before = store.rows_saved
+        self.waiting = {}
+        self.closed = self.capped = self.unlisted = 0
+        self._one_offs()
+        try:
+            self._before_symbols()
+            self._plan_run()
+            while self.pending:
+                if self.sweep_left and not _unserved_request(store, source.name, self.clock(), self.served):
+                    self._sweep()  # the symbols opened in the chart are served: back to daily bars first
+                # This symbol's time, not the run's start: a symbol opened hours into a run was fetched
+                # only up to when the run began, and its stamp left its request unmet ("next in line").
+                at = self.clock()
+                item, urgent = _next_item(self.pending, store, at, source.name, self.served)
+                try:
+                    through = self._step(item, urgent, at)
+                except RateLimited as e:  # the server says slow down: the run stops and the feed is killed
+                    raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
+                except SourceError as e:  # this symbol's own error (404, 5xx after retries, an unexpected
+                    # answer): it is skipped this run, the others go on, and one failing run after run waits a day
+                    self._step_failed(item, e)
+                    continue
+                if through:
+                    self.server_fails = 0  # a symbol went through: the feed works
+            self.queue.skip()
+            self._after_symbols()
+        except StopRun as e:
+            self.result.stopped = str(e)
+            log(f"stopped: {e}")
+            if e.strike:  # refused, or failing: the feed's fetching is killed (killswitch.py)
+                from . import killswitch
+
+                killswitch.strike(store, source.name, "fetch", str(e), log=log, at_least_s=killswitch.retry_after_s(e))
+            # rows of the symbol it stopped in were stored page by page: count them too
+            self.result.rows = max(self.result.rows, store.rows_saved - saved_before)
+        return self.result
+
+    def _one_offs(self) -> None:
+        """The one-off repairs of what earlier releases recorded, each done once (a kv mark)."""
+        source, store, log, now = self.source, self.store, self.log, self.now
+        if source.name in SYMBOLS_PER_MONTH and not store.kv_get(f"ledger:month-places:{source.name}:v1"):
+            # one-off: a feed that never stored anything (Tiingo without its key) took the month's places
+            # without sending a request; they are given back
+            if not store.holds_any(source.name):
+                store.kv_set(f"symbols:{source.name}:{now.astimezone(timezone.utc):%Y-%m}", "[]")
+                log(f"{source.name}: this month's symbol places were taken with nothing sent; given back")
+            store.kv_set(f"ledger:month-places:{source.name}:v1", now.isoformat())
+        if not store.kv_get(f"icons:unasked:{source.name}:v1"):
+            # one-off: icons recorded as "none" for stocks whose details were never read (they were not
+            # asked, so they waited 30 days for nothing); asked once their details are in
+            n = store.forget_unasked_icons(source.name)
+            store.kv_set(f"icons:unasked:{source.name}:v1", now.isoformat())
+            if n:
+                log(f"{source.name}: {n:,} icons marked missing without being asked; asked again with their details")
+        if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
+            n = store.mark_empty_heads()
+            store.kv_set("ledger:empty-heads:v1", now.isoformat())
+            if n:
+                log(f"ledger: {n} spans where a feed's history starts later marked as theirs to leave")
+        from .initializer import bulk_resolution, load_bulk
+
+        if bulk_resolution(source.name, "stock") == "second" and not store.kv_get(f"resolution:bulk-seconds:{source.name}:v1"):
+            # one-off (2026-10-28): the bulk stocks taken at minutes before go to 1-second bars (the
+            # second pass gives each its window once every minute history is in), their backfill kept
+            n = store.move_resolution(source.name, load_bulk(store), "minute", "second")
+            store.kv_set(f"resolution:bulk-seconds:{source.name}:v1", now.isoformat())
+            if n:
+                log(f"{source.name}: {n:,} stocks moved from minute to 1-second bars (their minute history kept)")
+
+    def _before_symbols(self) -> None:
+        """Before the symbols (a run for chosen symbols spends nothing on the rest): the feed's
+        exchanges once, this week's official calendars, the watched stocks' daily bars from the
+        whole-market file (one request a trading day), then the market moves from the same file."""
+        source, store, me, feeds, now, proxies, log = (self.source, self.store, self.me, self.feeds, self.now,
+                                                        self.proxies, self.log)
+        if self.archival or self.only is not None:
+            return
+        sync_exchanges(source, store, log)
+        if refresh_calendars(source, store, self.today, log):
+            freshness.use_official(store)  # this week's official schedules, from here on
+        if source.serves("stock") and gives_days(source, me):  # every watched stock's day: a request a day
+            market_days(source, store, me, feeds, store.watchlist(source.name), now, proxies or [], log)
+        fetch_market_moves(source, store, now, proxies or [], log)
+
+    def backfilling(self, w: dict) -> bool:
+        """Whether a symbol still fills its history: its bars to its floor, or, once no stock is
+        filling minutes any more, its window of 1-second bars."""
+        return _backfilling(w, self.floors[w["asset"]]) or (not self.filling and _seconds_pending(w))
+
+    def _sweep(self) -> None:
+        """Daily bars first (daily_first), until it stops for a symbol opened in the chart."""
+        done, stopped = daily_first(self.source, self.store, self.me, self.feeds, self.watched, self.floors["stock"],
+                                    self.order, self.refusals, self.clock(), self.log, limit=self.sweep_left,
+                                    served=self.served)
+        self.sweep_left = self.sweep_left - done if stopped else 0
+
+    def _plan_run(self) -> None:
+        """The run's plan: the symbols' order (fetch_order: the watchlists, the big movers, then the
+        most traded), the two passes (every stock's minute history, then the 1-second windows), the
+        daily-first sweep, the futures' share, the updates pause, and the run's rows on the fetch
+        queue (RunQueue: what the Fetcher shows)."""
+        source, store, log, now, today, me = self.source, self.store, self.log, self.now, self.today, self.me
+        only, archival = self.only, self.archival
+        if self.futures_per_run is None:
+            self.futures_per_run = FUTURES_PER_RUN
+        # Keep complete symbols current first; backfills take what budget is left, in the fetch
+        # order (fetch_order: watchlists, big movers, then most traded), then by ticker.
+        self.refusals = refusals = Refusals(store, source.name)
+        self.watched = watched = store.watchlist(source.name)
+        # watchlists, then the last session's big movers, then the most traded (fetch_order)
+        self.order = order = fetch_order(store, source.name, [w["ticker"] for w in watched if w["asset"] == "stock"])
+        # Two passes: every stock's minute history first, most traded first; then, once none is left
+        # to fill, every stock's window of 1-second bars in the same order (SECOND_HISTORY_DAYS).
+        self.filling = filling = _minutes_first(watched, self.floors, refusals, now, listed_elsewhere(store, today))
+        if only is None and any(_seconds_pending(w) for w in watched):
+            log(f"{source.name}: minute history first ({filling:,} stocks still filling); 1-second bars after"
+                if filling else f"{source.name}: 1-second pass: "
+                f"{sum(1 for w in watched if _seconds_pending(w)):,} stocks' 1-second windows to fill")
+        self.served = {}  # priority requests taken this run (each once)
+        self.sweep_left = DAILY_FIRST_PER_RUN if only is None and not archival and source.serves("stock") \
+            and gives_days(source, me) else 0
+        if self.sweep_left:
+            self._sweep()
+        # futures first: their share of the run is capped (FUTURES_PER_RUN), the stocks take the rest
+        self.pending = sorted(watched, key=lambda w: (w["asset"] != "future", self.backfilling(w),
+                                                      order.get(w["ticker"], len(order)), w["ticker"]))
+        self.queue = RunQueue(store, source.name, log)
+        self.queue.plan([w for w in self.pending if (only is None or w["ticker"] in only) and not w.get("closed_at")
+                         and source.serves(w["asset"]) and (only is not None or feed_needs(w, self.tier, now))],
+                        self.backfilling, settle=only is None)
+        self.futures_spent, self.futures_left = 0, 0  # this run's futures requests; futures left for the next run
+        self.futures_daily = _futures_kept_current(watched, order, store, now)
+        self.paused_updates = updates_pause(store, now) if not archival else None
+        self.held_back = 0 if self.paused_updates else None  # symbols whose update the pause left for later
+        self.picked = picked_symbols(store, now) if self.paused_updates else set()
+        self.on_lists = set(watchlist_tickers(store))  # updated through the session (history_horizon)
+        self.server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
+
+    def _step(self, item: dict, urgent: bool, at: datetime | None = None) -> bool:
+        """One symbol of the run: left alone (not asked for, closed, capped this month, refused run
+        after run, nothing published since its last sync, its update paused, a future past the run's
+        share or refreshed weekly), or fetched: its listing or reference checked, its resolution
+        found, every span this feed should hold downloaded newest first (sync_bars; a future's
+        contracts and rolls: sync_future), its official daily bars, what it stored verified
+        (verify_fetched) and its derived frames built. `urgent`: opened in the chart (taken before
+        anything else, its refresh interval not applied); `at`: this symbol's time (clock). Returns
+        whether the symbol went through to the end (its bars fetched and checked: the feed works)."""
+        source, store, log, now, today = self.source, self.store, self.log, self.now, self.today
+        only, archival, me, feeds, tier = self.only, self.archival, self.me, self.feeds, self.tier
+        refusals, queue, result = self.refusals, self.queue, self.result
+        at = at or self.clock()
+        ticker, asset = item["ticker"], item["asset"]
+        synced = item.get("synced_at")
+        if only is not None and ticker not in only:
+            return False
+        if archival and item.get("closed_at"):  # archive complete: never asked again
+            self.closed += 1
+            return False
+        if not source.serves(asset):  # e.g. Alpaca stocks or Tiingo without keys: nothing is sent
+            self.waiting[asset] = self.waiting.get(asset, 0) + 1
+            return False
+        if archival and not source.covers(item["source_ticker"]):
+            store.set_closed(source.name, ticker, now)
+            log(f"{ticker}: {source.name} has no history for it; closed")
+            return False
+        if archival and asset == "stock":  # a month's place only for history it can fill
+            gap = _archive_gap(source, store, me, feeds, item, self.floors[asset], now)
+            if gap is None:
+                self.unlisted += 1
+                return False
+            if not gap:
+                store.set_closed(source.name, ticker, now)
+                log(f"{ticker}: {source.name} has nothing to add (other feeds hold its history); closed")
+                return False
+        if not _monthly_symbol(store, source.name, ticker, now, monthly_cap(source),  # Tiingo's Starter: 500 a month
+                               getattr(source, "symbol_ledger", None)):
+            self.capped += 1
+            return False
+        if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
+            result.skipped += 1
+            return False
+        floor = self.floors[asset]
+        # History takes completed sessions only; the session under way is the live feeds'.
+        # A symbol opened in the chart, or on a watchlist, is the exception: the best feed
+        # for its current session is this one (freshness.history_horizon).
+        hours = freshness.hours(source.name, asset)  # the feed's own (Blue Ocean: the nights)
+        exchange = item.get("exchange") if asset == "stock" else None  # a listing abroad: its own days
+        horizon = at if urgent or only is not None or ticker in self.on_lists \
+            else freshness.history_horizon(hours, tier, at, exchange)
+        if (only is None or self.published_only) and synced and not self.backfilling(item) and not _due(
+                hours, tier, synced, horizon, 0.0 if urgent or only is not None else self.refresh_hours, exchange) \
+                and not _late(store, source.name, ticker, hours, tier, synced, horizon, exchange):
+            # nothing new published since its last sync (a symbol still backfilling is never skipped)
+            if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
+                store.set_synced(source.name, ticker, at)
+            result.skipped += 1
+            return False
+        if (self.held_back is not None and not urgent and only is None and synced and not self.backfilling(item)
+                and ticker not in self.picked and now - synced < timedelta(days=UPDATES_GAP_DAYS)):
+            self.held_back += 1  # updates paused: not picked, and not missing much
+            result.skipped += 1
+            return False
+        if asset == "future" and not urgent and only is None:
+            if self.futures_spent >= self.futures_per_run:
+                self.futures_left += 1  # this run's share of the futures rate is spent
+                result.skipped += 1
+                return False
+            if synced and ticker not in self.futures_daily and now - synced < timedelta(days=FUTURES_WEEKLY_DAYS):
+                result.skipped += 1  # a less traded future: refreshed weekly
+                return False
+        queue.start(ticker)
+        if self.on_item:
+            self.on_item(ticker)
+        spent = source.requests_made
+        began = int(datetime.now(timezone.utc).timestamp() * 1000)  # what this symbol's fetch stores is newer
+        if asset == "future":
+            try:
+                n = sync_future(source, store, item, floor, today, log)
+            except NotEntitled as e:
+                self.futures_spent += source.requests_made - spent
+                log(f"{ticker}: futures refused by your plan ({e.message}); skipped"
+                    + refusals.note(ticker, now, e.message))
+                queue.end(ticker, "failed", error=f"refused by your plan ({e.message})"[:300],
+                          requests=source.requests_made - spent)
+                return False
+            self.futures_spent += source.requests_made - spent
+            refusals.clear(ticker)
+            result.rows += n
+            log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
+            queue.end(ticker, rows=n, requests=source.requests_made - spent, detail=f"future: {n:,} rows")
+            store.set_synced(source.name, ticker, at)
+            return False  # (as before 1.5.0: a future's fetch leaves the count of server failures as it is)
+        if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
+            listing = Listing(True, item["listed_from"] or next(
+                (w["listed_from"] for w in store.watchlist(ticker=ticker) if w["listed_from"]), None))
+        elif asset == "stock":  # listing/identity checks only apply to listed securities
+            listing = check_listing(source, store, item, today, log)
+            if not listing.ok:
+                return False
+        else:
+            check_reference(source, store, item, today, log)
+            listing = Listing(True)
+        item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
+        item = _watch_row(store, source.name, ticker, log)
+        if item is None:
+            return False
+        exchange = item.get("exchange") if asset == "stock" else None
+        # a retired symbol has nothing after its last listed day: only its history is filled
+        stop = retired_end(item)
+        resolution = item["resolution"]
+        fetch, invert = item["source_ticker"], item["invert"]
+        if resolution == "trades":  # no ticks for history any more: found again (second or minute)
+            resolution = "auto"
+        if resolution == "auto":
+            resolution = resolve_resolution(source, store, ticker, log, asset=asset, fetch=fetch)
+            if resolution is None:
+                log(f"{ticker}: no supported resolution on your plan; skipped")
+                return False
+        span = dict(me=me, feeds=feeds, fetch=fetch, asset=asset, invert=invert,
+                    listed_from=listing.listed_from, log=log, stop=stop, exchange=exchange)
+        try:
+            if resolution == "second":
+                # minute bars for all the history (tens of requests for twenty years); 1-second
+                # bars for the recent window (SECOND_HISTORY_DAYS) in the second pass, or now for
+                # a symbol opened in the chart, or to keep a filled window current
+                n = sync_bars(source, store, ticker, "minute", item_floor, horizon, **span)
+                if not self.filling or urgent or only is not None or item.get("seconds_from"):
+                    s_floor = second_floor(me, today, item_floor)
+                    n += sync_bars(source, store, ticker, "second", s_floor, horizon, **span)
+                    if not item.get("seconds_from"):
+                        store.set_seconds_from(source.name, ticker, s_floor)
+            else:
+                n = sync_bars(source, store, ticker, resolution, item_floor, horizon, **span)
+        except NotEntitled as e:
+            # Its resolution is found again next run, from the class's answers: one symbol's
+            # refusal no longer clears them (the next probe, with whatever ticker came next,
+            # could mark the whole class refused for a week). A plan change is noticed by its
+            # setting (cli._note_tier) and by the answers' age (a week).
+            log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run"
+                + refusals.note(ticker, now, e.message))
+            store.set_resolution(source.name, ticker, "auto")
+            queue.end(ticker, "failed", error=f"{resolution}: refused by your plan ({e.message})"[:300],
+                      requests=source.requests_made - spent)
+            return False
+        refusals.clear(ticker)
+        result.rows += n
+        store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
+        if resolution != "day" and gives_days(source, me, asset):
+            try:  # official daily bars (closing auction included) for day/week/month charts
+                n_day = sync_bars(source, store, ticker, "day", item_floor, horizon, **span)
+            except NotEntitled:
+                n_day = 0
+            result.rows += n_day
+            # every other frame (30 s, 5 and 30 min, hours, weeks ...) is built here from the
+            # 1-second, 1-minute and daily bars (derive.py): a feed's own 5-minute and hourly
+            # candles are not fetched (requests, and the same bars stored twice)
+            log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
+        else:
+            n_day = 0
+            log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
+        queue.end(ticker, rows=n + n_day, requests=source.requests_made - spent,
+                  detail=f"{resolution}: {n:,} rows" + (f", daily: {n_day:,}" if n_day else ""))
+        store.set_synced(source.name, ticker, at)  # when its fetch began: anything later is asked next time
+        verify_fetched(source, store, ticker, asset, fetch, invert, began, me, feeds, log, exchange)
+        _derive_symbol(store, source.name, ticker, asset, log)  # bad data checked first (baddata.py)
+        if archival:
+            spans = [resolution] if resolution == "day" else [resolution, "day"]
+            if not any(_plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from, stop, exchange)
+                       for ts in spans):
+                store.set_closed(source.name, ticker, now)
+                log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
+        elif asset == "stock":
+            fetch_icon(source, store, ticker, log)
+        return True
+
+    def _step_failed(self, item: dict, e: SourceError) -> None:
+        """A symbol's own error (404, 5xx after retries, an unexpected answer): skipped this run, the
+        others go on, and one failing run after run waits a day (Refusals). The feed saying no, or
+        FETCH_FAILURES symbols in a row failing on its side (an outage), stop the run and kill the
+        feed's fetching (StopRun with a strike)."""
+        source, now = self.source, self.now
+        self.log(f"{item['ticker']}: {e}; skipped this run" + self.refusals.note(item["ticker"], now, str(e)))
+        self.queue.end(item["ticker"], "failed", error=str(e)[:300])
+        from . import killswitch
+
+        if not isinstance(e, NotEntitled) and killswitch.is_refusal(e, e.status):  # no to the feed, not one symbol
+            raise StopRun(f"refused by {source.name} ({e})", strike=True) from e
+        self.server_fails = self.server_fails + 1 if e.status == 0 or e.status >= 500 else 0
+        if self.server_fails >= killswitch.FETCH_FAILURES:
+            raise StopRun(f"{self.server_fails} symbols in a row failed on {source.name}'s side (last: {e})",
+                          strike=True) from e
+
+    def _after_symbols(self) -> None:
+        """After the symbols: what the run left alone and why, other feeds' data spot-audited with
+        this feed (2 % of the run's cap), and the directory's placeholders and icons on the budget
+        the watchlist and the audits left (reckoned now, after they have spent)."""
+        source, store, log, now, today, me, feeds = (self.source, self.store, self.log, self.now, self.today, self.me,
+                                                      self.feeds)
+        only, archival = self.only, self.archival
+        if self.closed:
+            log(f"{source.name}: {self.closed} symbols closed (archive complete), not asked")
+        if self.capped:
+            log(f"{source.name}: {self.capped} symbols wait for next month (its plan: "
+                f"{monthly_cap(source)} different symbols a month)")
+        if self.unlisted:
+            log(f"{source.name}: {self.unlisted} stocks wait for a listing date from another feed (history is kept "
+                "from the current listing only)")
+        if self.held_back:
+            log(f"{source.name}: {self.held_back:,} symbols' updates paused until {self.paused_updates['until'][:10]} "
+                f"(not picked, at most {UPDATES_GAP_DAYS} days behind)")
+        if self.futures_left:
+            log(f"{source.name}: {self.futures_spent:,} futures requests this run (FUTURES_PER_RUN "
+                f"{self.futures_per_run:,}); {self.futures_left:,} futures left for the next runs")
+        if self.waiting:
+            log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(self.waiting.items()))
+                + " not collected by this feed here (see `deps`: keys or plan)")
+        if only is None and any(self.audits) and not archival:
+            from .audit import allowance, run_audits
+            run_audits(source, store, me, feeds, now, queued=self.audits[0], random_count=self.audits[1], log=log,
+                       requests=allowance(source))  # spot checks: 2 % of the run's cap
+        if only is None and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
+            # reckoned now, after the watchlist and audits have spent (reckoned before the run, icons
+            # could take the day's reserve, and later runs sent nothing for the rest of the day)
+            left = self.directory_allowance() if callable(self.directory_allowance) else self.directory_allowance
+            if left > 0:
+                spent = source.requests_made
+                refresh_directory(source, store, today, log)
+                fill_directory_icons(source, store, left - (source.requests_made - spent), today, log)
+
+
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
     directory_allowance: int | Callable[[], int] = 0, feeds: dict[str, FeedProfile] | None = None,
-    audits: tuple[int, int] = (0, 0), published_only: bool = False, futures_per_run: int = FUTURES_PER_RUN,
+    audits: tuple[int, int] = (0, 0), published_only: bool = False, futures_per_run: int | None = None,
     proxies: list[str] | None = None,
 ) -> SyncResult:
-    """One scheduled run over the watchlist for a source.
+    """One scheduled run over the watchlist for a source: Collector(...).run(...).
 
     A fully synced symbol is skipped until its plan should have published new data (see
     `freshness`; on the free plan stocks only change once a day, so asking hourly would only
@@ -1333,331 +1816,19 @@ def sync(
     feed can serve (see coverage.py); `audits` = (queued, random) audits this run may do for
     other feeds' data. `directory_allowance`: requests the directory's placeholders and icons may
     use once the watchlist and audits are done, or a function giving it then (from what the day
-    has spent by that time).
+    has spent by that time). `futures_per_run`: the futures' share of the run (FUTURES_PER_RUN
+    when None); `proxies`: the market proxies whose closes colour the globe (the app's).
     """
-    now = (now or now_et()).astimezone(ET)
-    started = monotonic()
+    return Collector(source, store, tier, now=now, log=log, refresh_hours=refresh_hours, feeds=feeds, audits=audits,
+                     futures_per_run=futures_per_run, proxies=proxies).run(
+        only=only, published_only=published_only, on_item=on_item, directory_allowance=directory_allowance)
 
-    def clock() -> datetime:  # the time now: a run lasts hours, and `now` is when it began
-        return now + timedelta(seconds=monotonic() - started)
 
-    today = now.date()
-    freshness.use_official(store)  # the official holidays fetched so far: what is published, and when
-    floors = {a: history_floor(tier, today, a) for a in ASSETS}  # each asset class on its own plan
-    result = SyncResult()
-    saved_before = store.rows_saved
-    feeds = dict(feeds or {})
-    me = feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
-    feeds[source.name] = me
-    waiting: dict[str, int] = {}
-    archival = getattr(source, "archival", False)  # a closed feed: fills history once per symbol
-    closed = capped = unlisted = 0
-    if source.name in SYMBOLS_PER_MONTH and not store.kv_get(f"ledger:month-places:{source.name}:v1"):
-        # one-off: a feed that never stored anything (Tiingo without its key) took the month's places
-        # without sending a request; they are given back
-        if not store.holds_any(source.name):
-            store.kv_set(f"symbols:{source.name}:{now.astimezone(timezone.utc):%Y-%m}", "[]")
-            log(f"{source.name}: this month's symbol places were taken with nothing sent; given back")
-        store.kv_set(f"ledger:month-places:{source.name}:v1", now.isoformat())
-    if not store.kv_get(f"icons:unasked:{source.name}:v1"):
-        # one-off: icons recorded as "none" for stocks whose details were never read (they were not
-        # asked, so they waited 30 days for nothing); asked once their details are in
-        n = store.forget_unasked_icons(source.name)
-        store.kv_set(f"icons:unasked:{source.name}:v1", now.isoformat())
-        if n:
-            log(f"{source.name}: {n:,} icons marked missing without being asked; asked again with their details")
-    if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
-        n = store.mark_empty_heads()
-        store.kv_set("ledger:empty-heads:v1", now.isoformat())
-        if n:
-            log(f"ledger: {n} spans where a feed's history starts later marked as theirs to leave")
-    from .initializer import bulk_resolution, load_bulk
-
-    if bulk_resolution(source.name, "stock") == "second" and not store.kv_get(f"resolution:bulk-seconds:{source.name}:v1"):
-        # one-off (2026-10-28): the bulk stocks taken at minutes before go to 1-second bars (the
-        # second pass gives each its window once every minute history is in), their backfill kept
-        n = store.move_resolution(source.name, load_bulk(store), "minute", "second")
-        store.kv_set(f"resolution:bulk-seconds:{source.name}:v1", now.isoformat())
-        if n:
-            log(f"{source.name}: {n:,} stocks moved from minute to 1-second bars (their minute history kept)")
-    try:
-        if not archival and only is None:  # a run for chosen symbols spends nothing on the rest
-            sync_exchanges(source, store, log)
-            if refresh_calendars(source, store, today, log):
-                freshness.use_official(store)  # this week's official schedules, from here on
-            if source.serves("stock") and gives_days(source, me):  # every watched stock's day: a request a day
-                market_days(source, store, me, feeds, store.watchlist(source.name), now, proxies or [], log)
-            fetch_market_moves(source, store, now, proxies or [], log)
-        # Keep complete symbols current first; backfills take what budget is left, in the fetch
-        # order (fetch_order: watchlists, big movers, then most traded), then by ticker.
-        refusals = Refusals(store, source.name)
-        watched = store.watchlist(source.name)
-        # watchlists, then the last session's big movers, then the most traded (fetch_order)
-        order = fetch_order(store, source.name, [w["ticker"] for w in watched if w["asset"] == "stock"])
-        # Two passes: every stock's minute history first, most traded first; then, once none is left
-        # to fill, every stock's window of 1-second bars in the same order (SECOND_HISTORY_DAYS).
-        filling = _minutes_first(watched, floors, refusals, now, listed_elsewhere(store, today))
-        if only is None and any(_seconds_pending(w) for w in watched):
-            log(f"{source.name}: minute history first ({filling:,} stocks still filling); 1-second bars after"
-                if filling else f"{source.name}: 1-second pass: "
-                f"{sum(1 for w in watched if _seconds_pending(w)):,} stocks' 1-second windows to fill")
-
-        def backfilling(w: dict) -> bool:
-            return _backfilling(w, floors[w["asset"]]) or (not filling and _seconds_pending(w))
-
-        served: dict = {}  # priority requests taken this run (each once)
-        sweep_left = DAILY_FIRST_PER_RUN if only is None and not archival and source.serves("stock")             and gives_days(source, me) else 0
-
-        def sweep() -> None:  # daily bars first (daily_first), until it stops for a symbol opened in the chart
-            nonlocal sweep_left
-            done, stopped = daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, clock(),
-                                        log, limit=sweep_left, served=served)
-            sweep_left = sweep_left - done if stopped else 0
-
-        if sweep_left:
-            sweep()
-        # futures first: their share of the run is capped (FUTURES_PER_RUN), the stocks take the rest
-        pending = sorted(watched, key=lambda w: (w["asset"] != "future", backfilling(w), order.get(w["ticker"], len(order)),
-                                                 w["ticker"]))
-        queue = _Queue(store, source.name, log)
-        queue.plan([w for w in pending if (only is None or w["ticker"] in only) and not w.get("closed_at")
-                    and source.serves(w["asset"]) and (only is not None or feed_needs(w, tier, now))],
-                   backfilling, settle=only is None)
-        futures_spent, futures_left = 0, 0  # this run's futures requests; futures left for the next run
-        futures_daily = _futures_kept_current(watched, order, store, now)
-        paused_updates = updates_pause(store, now) if not archival else None
-        held_back = 0 if paused_updates else None  # symbols whose update the pause left for later
-        picked = picked_symbols(store, now) if paused_updates else set()
-        on_lists = set(watchlist_tickers(store))  # updated through the session (history_horizon)
-        server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
-        while pending:
-            if sweep_left and not _unserved_request(store, source.name, clock(), served):
-                sweep()  # the symbols opened in the chart are served: back to daily bars first
-            # This symbol's time, not the run's start: a symbol opened hours into a run was fetched
-            # only up to when the run began, and its stamp left its request unmet ("next in line").
-            at = clock()
-            item, urgent = _next_item(pending, store, at, source.name, served)
-            try:
-                ticker, asset = item["ticker"], item["asset"]
-                synced = item.get("synced_at")
-                if only is not None and ticker not in only:
-                    continue
-                if archival and item.get("closed_at"):  # archive complete: never asked again
-                    closed += 1
-                    continue
-                if not source.serves(asset):  # e.g. Alpaca stocks or Tiingo without keys: nothing is sent
-                    waiting[asset] = waiting.get(asset, 0) + 1
-                    continue
-                if archival and not source.covers(item["source_ticker"]):
-                    store.set_closed(source.name, ticker, now)
-                    log(f"{ticker}: {source.name} has no history for it; closed")
-                    continue
-                if archival and asset == "stock":  # a month's place only for history it can fill
-                    gap = _archive_gap(source, store, me, feeds, item, floors[asset], now)
-                    if gap is None:
-                        unlisted += 1
-                        continue
-                    if not gap:
-                        store.set_closed(source.name, ticker, now)
-                        log(f"{ticker}: {source.name} has nothing to add (other feeds hold its history); closed")
-                        continue
-                if not _monthly_symbol(store, source.name, ticker, now, monthly_cap(source),  # Tiingo's Starter: 500 a month
-                                       getattr(source, "symbol_ledger", None)):
-                    capped += 1
-                    continue
-                if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
-                    result.skipped += 1
-                    continue
-                floor = floors[asset]
-                # History takes completed sessions only; the session under way is the live feeds'.
-                # A symbol opened in the chart, or on a watchlist, is the exception: the best feed
-                # for its current session is this one (freshness.history_horizon).
-                hours = freshness.hours(source.name, asset)  # the feed's own (Blue Ocean: the nights)
-                exchange = item.get("exchange") if asset == "stock" else None  # a listing abroad: its own days
-                horizon = at if urgent or only is not None or ticker in on_lists \
-                    else freshness.history_horizon(hours, tier, at, exchange)
-                if (only is None or published_only) and synced and not backfilling(item) and not _due(
-                        hours, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours, exchange) \
-                        and not _late(store, source.name, ticker, hours, tier, synced, horizon, exchange):
-                    # nothing new published since its last sync (a symbol still backfilling is never skipped)
-                    if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
-                        store.set_synced(source.name, ticker, at)
-                    result.skipped += 1
-                    continue
-                if (held_back is not None and not urgent and only is None and synced and not backfilling(item)
-                        and ticker not in picked and now - synced < timedelta(days=UPDATES_GAP_DAYS)):
-                    held_back += 1  # updates paused: not picked, and not missing much
-                    result.skipped += 1
-                    continue
-                if asset == "future" and not urgent and only is None:
-                    if futures_spent >= futures_per_run:
-                        futures_left += 1  # this run's share of the futures rate is spent
-                        result.skipped += 1
-                        continue
-                    if synced and ticker not in futures_daily and now - synced < timedelta(days=FUTURES_WEEKLY_DAYS):
-                        result.skipped += 1  # a less traded future: refreshed weekly
-                        continue
-                queue.start(ticker)
-                if on_item:
-                    on_item(ticker)
-                spent = source.requests_made
-                began = int(datetime.now(timezone.utc).timestamp() * 1000)  # what this symbol's fetch stores is newer
-                if asset == "future":
-                    try:
-                        n = sync_future(source, store, item, floor, today, log)
-                    except NotEntitled as e:
-                        futures_spent += source.requests_made - spent
-                        log(f"{ticker}: futures refused by your plan ({e.message}); skipped"
-                            + refusals.note(ticker, now, e.message))
-                        queue.end(ticker, "failed", error=f"refused by your plan ({e.message})"[:300],
-                                  requests=source.requests_made - spent)
-                        continue
-                    futures_spent += source.requests_made - spent
-                    refusals.clear(ticker)
-                    result.rows += n
-                    log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
-                    queue.end(ticker, rows=n, requests=source.requests_made - spent, detail=f"future: {n:,} rows")
-                    store.set_synced(source.name, ticker, at)
-                    continue
-                if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
-                    listing = Listing(True, item["listed_from"] or next(
-                        (w["listed_from"] for w in store.watchlist(ticker=ticker) if w["listed_from"]), None))
-                elif asset == "stock":  # listing/identity checks only apply to listed securities
-                    listing = check_listing(source, store, item, today, log)
-                    if not listing.ok:
-                        continue
-                else:
-                    check_reference(source, store, item, today, log)
-                    listing = Listing(True)
-                item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
-                item = _watch_row(store, source.name, ticker, log)
-                if item is None:
-                    continue
-                exchange = item.get("exchange") if asset == "stock" else None
-                # a retired symbol has nothing after its last listed day: only its history is filled
-                stop = retired_end(item)
-                resolution, backfilled_to = item["resolution"], item["backfilled_to"]
-                fetch, invert = item["source_ticker"], item["invert"]
-                if resolution == "trades":  # no ticks for history any more: found again (second or minute)
-                    resolution = "auto"
-                if resolution == "auto":
-                    resolution = resolve_resolution(source, store, ticker, log, asset=asset, fetch=fetch)
-                    backfilled_to = None
-                    if resolution is None:
-                        log(f"{ticker}: no supported resolution on your plan; skipped")
-                        continue
-                span = dict(me=me, feeds=feeds, fetch=fetch, asset=asset, invert=invert,
-                            listed_from=listing.listed_from, log=log, stop=stop, exchange=exchange)
-                try:
-                    if resolution == "second":
-                        # minute bars for all the history (tens of requests for twenty years); 1-second
-                        # bars for the recent window (SECOND_HISTORY_DAYS) in the second pass, or now for
-                        # a symbol opened in the chart, or to keep a filled window current
-                        n = sync_bars(source, store, ticker, "minute", item_floor, horizon, **span)
-                        if not filling or urgent or only is not None or item.get("seconds_from"):
-                            s_floor = second_floor(me, today, item_floor)
-                            n += sync_bars(source, store, ticker, "second", s_floor, horizon, **span)
-                            if not item.get("seconds_from"):
-                                store.set_seconds_from(source.name, ticker, s_floor)
-                    else:
-                        n = sync_bars(source, store, ticker, resolution, item_floor, horizon, **span)
-                except NotEntitled as e:
-                    # Its resolution is found again next run, from the class's answers: one symbol's
-                    # refusal no longer clears them (the next probe, with whatever ticker came next,
-                    # could mark the whole class refused for a week). A plan change is noticed by its
-                    # setting (cli._note_tier) and by the answers' age (a week).
-                    log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run"
-                        + refusals.note(ticker, now, e.message))
-                    store.set_resolution(source.name, ticker, "auto")
-                    queue.end(ticker, "failed", error=f"{resolution}: refused by your plan ({e.message})"[:300],
-                              requests=source.requests_made - spent)
-                    continue
-                refusals.clear(ticker)
-                result.rows += n
-                store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
-                if resolution != "day" and gives_days(source, me, asset):
-                    try:  # official daily bars (closing auction included) for day/week/month charts
-                        n_day = sync_bars(source, store, ticker, "day", item_floor, horizon, **span)
-                    except NotEntitled:
-                        n_day = 0
-                    result.rows += n_day
-                    # every other frame (30 s, 5 and 30 min, hours, weeks ...) is built here from the
-                    # 1-second, 1-minute and daily bars (derive.py): a feed's own 5-minute and hourly
-                    # candles are not fetched (requests, and the same bars stored twice)
-                    log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
-                else:
-                    n_day = 0
-                    log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
-                queue.end(ticker, rows=n + n_day, requests=source.requests_made - spent,
-                          detail=f"{resolution}: {n:,} rows" + (f", daily: {n_day:,}" if n_day else ""))
-                store.set_synced(source.name, ticker, at)  # when its fetch began: anything later is asked next time
-                verify_fetched(source, store, ticker, asset, fetch, invert, began, me, feeds, log, exchange)
-                _derive_symbol(store, source.name, ticker, asset, log)  # bad data checked first (baddata.py)
-                if archival:
-                    spans = [resolution] if resolution == "day" else [resolution, "day"]
-                    if not any(_plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from, stop, exchange)
-                               for ts in spans):
-                        store.set_closed(source.name, ticker, now)
-                        log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
-                elif asset == "stock":
-                    fetch_icon(source, store, ticker, log)
-            except RateLimited as e:  # the server says slow down: the run stops and the feed is killed
-                raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
-            except SourceError as e:  # this symbol's own error (404, 5xx after retries, an unexpected
-                # answer): it is skipped this run, the others go on, and one failing run after run waits a day
-                log(f"{item['ticker']}: {e}; skipped this run" + refusals.note(item["ticker"], now, str(e)))
-                queue.end(item["ticker"], "failed", error=str(e)[:300])
-                from . import killswitch
-
-                if not isinstance(e, NotEntitled) and killswitch.is_refusal(e, e.status):  # no to the feed, not one symbol
-                    raise StopRun(f"refused by {source.name} ({e})", strike=True) from e
-                server_fails = server_fails + 1 if e.status == 0 or e.status >= 500 else 0
-                if server_fails >= killswitch.FETCH_FAILURES:
-                    raise StopRun(f"{server_fails} symbols in a row failed on {source.name}'s side (last: {e})",
-                                  strike=True) from e
-                continue
-            server_fails = 0  # a symbol went through: the feed works
-        queue.skip()
-        if closed:
-            log(f"{source.name}: {closed} symbols closed (archive complete), not asked")
-        if capped:
-            log(f"{source.name}: {capped} symbols wait for next month (its plan: "
-                f"{monthly_cap(source)} different symbols a month)")
-        if unlisted:
-            log(f"{source.name}: {unlisted} stocks wait for a listing date from another feed (history is kept "
-                "from the current listing only)")
-        if held_back:
-            log(f"{source.name}: {held_back:,} symbols' updates paused until {paused_updates['until'][:10]} "
-                f"(not picked, at most {UPDATES_GAP_DAYS} days behind)")
-        if futures_left:
-            log(f"{source.name}: {futures_spent:,} futures requests this run (FUTURES_PER_RUN {futures_per_run:,}); "
-                f"{futures_left:,} futures left for the next runs")
-        if waiting:
-            log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
-                + " not collected by this feed here (see `deps`: keys or plan)")
-        if only is None and any(audits) and not archival:
-            from .audit import allowance, run_audits
-            run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log,
-                       requests=allowance(source))  # spot checks: 2 % of the run's cap
-        if only is None and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
-            # reckoned now, after the watchlist and audits have spent (reckoned before the run, icons
-            # could take the day's reserve, and later runs sent nothing for the rest of the day)
-            left = directory_allowance() if callable(directory_allowance) else directory_allowance
-            if left > 0:
-                spent = source.requests_made
-                refresh_directory(source, store, today, log)
-                fill_directory_icons(source, store, left - (source.requests_made - spent), today, log)
-    except StopRun as e:
-        result.stopped = str(e)
-        log(f"stopped: {e}")
-        if e.strike:  # refused, or failing: the feed's fetching is killed (killswitch.py)
-            from . import killswitch
-
-            killswitch.strike(store, source.name, "fetch", str(e), log=log, at_least_s=killswitch.retry_after_s(e))
-        # rows of the symbol it stopped in were stored page by page: count them too
-        result.rows = max(result.rows, store.rows_saved - saved_before)
-    return result
-
+# The run's source is the Collector's: inspect.getsource(sync) reads the class (the charts app's
+# tests/test_market_days.py reads from it the order the stages take: the market days before the
+# market moves). The signature stays sync's own.
+sync.__signature__ = inspect.signature(sync)
+sync.__wrapped__ = Collector
 
 CALENDAR_REFRESH_DAYS = 7
 NEWS_REFRESH_MINUTES = 30  # a vendor's headlines (its publisher plugin, publications.py): this often
