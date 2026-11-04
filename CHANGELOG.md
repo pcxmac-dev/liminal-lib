@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 (2026-11-03)
+
+The class contract, plugin API 2.0 (the user: "all the plugins under liminal should basically follow
+inheritance/oop paradigm"). `sources/plugin.py`: a plugin is an instance of a `FeedPlugin` or
+`PublisherPlugin` subclass, what it declares class attributes, what it does methods overriding the
+contract's defaults (`build`, `view`, `rate`, `has_keys`, `serves`, `markets`, `carries`,
+`plan_resolutions`, `reporter`, `scan`, `settings`; a publisher's `moments`, `calendar`, `read`); the
+registry loads an instance, a class (instantiated) or a module's `PLUGIN(S)`, `PUBLISHER(S)`,
+`ASSISTANT(S)`. The record form (`Provider`, `Publisher`: the hooks as callback fields) is a subclass of
+the same classes (`is_record`), still plugin API 1.x (`RECORD_API` 1.12; `api_refusal(..., record=True)`),
+so every plugin loads as before. `Plugin.gives`, `has_scan`, `has_settings`, `settings_of`, `with_`,
+`refusal`; `PublisherPlugin.has_moments`, `has_calendar`, `reads_itself` (the reader, the stores and the
+views test these instead of the fields). A feed declares its publication delays and market hours
+(`FeedPlugin.delays`, `hours`: `freshness.Delays`, `DELAYS.declare` when it loads; the rows of
+`PLAN_DELAYS` and `FEED_HOURS` stay until every plugin carries its own). `config.load_settings` builds a
+plugin's own settings for every kind (`Settings.plugin` for a publisher too). `sources/archive.py`:
+`PublicFeedPlugin` (its source on the contract's public client) and `CryptoVenuePlugin` (a crypto
+exchange's plan and caps, `CRYPTO_VENUE_DAYS`). `Scanned`, `Report`, `Limits`, `Capability`,
+`minute_window`, `within`, `server_limits`, `server_per_minute` moved to `sources/plugin.py`, still
+imported from the registry.
+
 ## 1.2.4 (2026-11-03)
 
 1.2.3's `same_market` undone: two feeds naming no market for an asset class count as one market again (the

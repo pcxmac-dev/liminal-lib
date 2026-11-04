@@ -4,7 +4,8 @@ The Liminal library: the common code every Liminal program builds on.
 
 - [liminal](https://github.com/pcxmac-dev/liminal): the chart app (its front, its pages, the data API and the command line);
 - [liminal-integrator](https://github.com/pcxmac-dev/liminal-integrator): the fetcher, which collects the data and serves it;
-- the plugins, `liminal-plugin-<name>`: one per data provider, on the contract here (`sources/registry.py`).
+- the plugins, `liminal-plugin-<name>`: one per data provider, on the contract here (`sources/plugin.py`: the
+  classes; `sources/registry.py`: the registry).
 
 What is here (`src/liminal_lib`): the stores (`storage/`: SQLite, DuckDB and MongoDB by data type), the plugin
 contract and the registry (`sources/`), the collector (`collector.py`: the finest data each plan allows, as far

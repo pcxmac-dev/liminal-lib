@@ -1,9 +1,12 @@
-"""Data providers are plugins: one `Provider` each, holding everything the app needs to know about it.
+"""Data providers are plugins: a feed plugin each (sources/plugin.py: FeedPlugin; its record form, the
+`Provider` here), holding everything the app needs to know about it.
 
-A provider plugin is a module that defines `PLUGIN` (a Provider; `PLUGINS` for several). Every one
-is a package of its own now (liminal-plugin-<name>, 2026-11-01), registering under the entry point
-group `liminal.providers` (pointing at the module, or at the Provider itself); a module dropped in
-`sources/plugins/` is still found on the next start, as the built-ins were.
+A plugin is a module that defines `PLUGIN` (a FeedPlugin subclass, or an instance of one: a Provider
+record; `PLUGINS` for several), a publisher's `PUBLISHER` (sources/publisher.py) or an assistant's
+`ASSISTANT` (assistants/plugin.py). Every one is a package of its own (liminal-plugin-<name>,
+2026-11-01), registering under the entry point group `liminal.providers` (pointing at the module, or
+at the plugin itself); the plugin directory's checkouts are loaded from there (plugin_checkouts),
+and a module dropped in `sources/plugins/` is still found on the next start, as the built-ins were.
 
 What a plugin gives:
 - `build(settings, request_budget)`: its DataSource (sources/base.py), with its limiter and caps.
@@ -27,33 +30,37 @@ What a plugin gives:
   and its live streams. The delivery scheme (sourcing.py) reads only these reports; `sourcing`
   shows them. A plugin whose plan says more than its declarations amends its report (`reporter`).
 
-Callbacks left out take the defaults below, so a plain keyed REST feed needs little more than its
-build. A plugin that fails to load is left out and reported (`errors()`, `plugins`), never fatal.
+Hooks left out take the contract's defaults (FeedPlugin's methods), so a plain keyed REST feed needs
+little more than its build. A plugin that fails to load is left out and reported (`errors()`,
+`plugins`), never fatal.
 
-The contract is versioned (`PLUGIN_API`, major.minor; docs/ARCHITECTURE.md says what it holds).
-Each plugin gives its own `version` (a package's may leave it empty: its distribution's is used)
-and the contract it was written for (`api`). One written for another major, or for a newer minor
-than this app offers, is left out and reported like a broken one.
+The contract is versioned (`PLUGIN_API`, major.minor; docs/ARCHITECTURE.md says what it holds): a
+class is written for 2.x, the record form (Provider, Publisher: the hooks as callback fields) for
+1.x (`RECORD_API`, every minor up to it still loaded). Each plugin gives its own `version` (a
+package's may leave it empty: its distribution's is used) and the contract it was written for
+(`api`). One written for another major, or for a newer minor than this app offers, is left out and
+reported like a broken one.
 """
 from __future__ import annotations
 
 import importlib
-import math
 import pkgutil
 import sys
 import threading
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 from .. import layout
 from ..layout import MAIN, Database  # noqa: F401 - plugins import them from here
-from ..models import is_foreign
 from ..ratelimit import MachineLedger, RateLimiter  # plugins import MachineLedger from here (1.10)
 from .fetching import Fetched, FetchContext, Fetcher, Job  # noqa: F401 - plugins import them from here
 from .keys import KeyVar  # noqa: F401 - plugins import it from here
-from .publisher import Publisher
+from .plugin import (DEFAULT_PER_REQUEST, SERVER_SHARE, Capability, FeedPlugin, Limits,  # noqa: F401 - from here too
+                     Plugin, Report, Scanned, _per, databases_refused, minute_window, server_limits,
+                     server_per_minute, within)
+from .publisher import Publisher, PublisherPlugin
 from .stream import Live
 
 if TYPE_CHECKING:
@@ -61,7 +68,6 @@ if TYPE_CHECKING:
     from .base import DataSource
 
 ENTRY_POINTS = "liminal.providers"
-DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does not say
 # The plugin contract this app offers (major.minor): a new minor only adds (a field with a default,
 # a helper), a new major changes or removes something a plugin may rely on. A plugin written
 # before the contract had a number was written for 1.0 (Provider.api's default).
@@ -96,7 +102,13 @@ DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does n
 # 1.12 (2026-11-02): Provider.exchanges, the exchanges outside the US whose stock listings a feed
 #   carries (models.VENUES: 7203.T on XTKS); without it, and without `carries`, a stock feed holds
 #   US listings only. The directory asks a feed's listings() for those exchanges too.
-PLUGIN_API = "1.12"
+# 2.0 (2026-11-03): the class contract (sources/plugin.py): a plugin is an instance of a FeedPlugin
+#   or PublisherPlugin subclass (an AssistantPlugin's too: assistants/plugin.py), what it declares
+#   class attributes, what it does methods overriding the contract's defaults; FeedPlugin.delays and
+#   hours (freshness.Delays). The record form (Provider, Publisher: the hooks as callback fields) is
+#   plugin API 1.x still, every minor up to RECORD_API, loaded as before.
+PLUGIN_API = "2.0"
+RECORD_API = "1.12"  # the record form's contract: what a Provider or a Publisher may declare
 
 
 def api_version(api) -> tuple[int, int]:
@@ -107,14 +119,28 @@ def api_version(api) -> tuple[int, int]:
     return int(parts[0]), int(parts[1]) if len(parts) == 2 else 0
 
 
-def api_refusal(api, offered: str | None = None) -> str | None:
-    """Why a plugin written for contract `api` cannot load in an app offering `offered` (default:
-    PLUGIN_API; None: it can): its major must be the app's, its minor no newer than the app's."""
-    offered = offered or PLUGIN_API
+def api_refusal(api, offered: str | None = None, *, record: bool = False) -> str | None:
+    """Why a plugin written for contract `api` cannot load in an app offering `offered` (None: it
+    can): its major must be the app's, its minor no newer than the app's. A class is held to
+    PLUGIN_API; the record form (`record`: a Provider or a Publisher) to RECORD_API, the 1.x contract
+    it is, so every plugin from before the classes loads as it did."""
     try:
         major, minor = api_version(api)
     except ValueError as e:
         return str(e)
+    if record:
+        offered = offered or RECORD_API
+        have, have_minor = api_version(offered)
+        if major > have:
+            return (f"written for plugin API {api} as a record (a Provider or a Publisher); the record form is "
+                    f"plugin API {have}.x (this app's {offered}): a plugin written for {major}.x is a class "
+                    "(FeedPlugin, PublisherPlugin)")
+        if major < have:
+            return f"written for plugin API {api}; this app offers {offered} for records: it needs a release for {have}.x"
+        if minor > have_minor:
+            return f"written for plugin API {api}, newer than this app's {offered} for records: it needs a newer app"
+        return None
+    offered = offered or PLUGIN_API
     have, have_minor = api_version(offered)
     if major < have:
         return f"written for plugin API {api}; this app offers {offered}: it needs a release for {have}.x"
@@ -125,96 +151,19 @@ def api_refusal(api, offered: str | None = None) -> str | None:
     return None
 
 
-@dataclass(frozen=True)
-class Scanned:
-    """A capability scan's answer: each thing asked (what, available, detail), and the plan the
-    answers show ({plan variable: value}; empty when they cannot tell the plans apart). `alike`:
-    the other values the same answers would come from ({variable: (values)}: Tiingo's Power and
-    Commercial reach the same data), the plan found being the one with the lowest limits."""
-    results: tuple[tuple[str, bool, str], ...]
-    plan: Mapping[str, str] = field(default_factory=dict)
-    alike: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    # its limits verified (run_scan): the rate-limit headers its server sent, the limit a minute
-    # they give, the window kept ({seen, perMinute, kept}); a server limit below the window kept
-    # is used from then on (rate_window)
-    limits: Mapping[str, object] = field(default_factory=dict)
-
-
-# -- the standard report every provider gives the delivery scheme (sourcing.py) ---------------------
-
-@dataclass(frozen=True)
-class Limits:
-    """A subscription's limits: what a job's cost is counted against."""
-    requests_a_day: float  # what it can send in a day: its daily cap, or less where its rate is tighter
-    per_day: int | None = None
-    per_run: int | None = None
-    rate: tuple[int | None, float] | None = None  # (requests, seconds) its limiter keeps
-    symbols_a_month: int | None = None
-    published: str = ""  # what its server publishes
-
-
-@dataclass(frozen=True)
-class Capability:
-    """One job a provider can do on its plan: an asset class at one resolution."""
-    asset: str
-    resolution: str  # day, minute, second
-    market: str  # what its data is: feeds of one market are copies of each other
-    since: object  # date: how far back its plan reaches
-    latency: float  # seconds its newest data trails real time (86,400: end of day)
-    per_request: int | None  # bars one request returns (None: a symbol's whole history at once)
-
-
-@dataclass(frozen=True)
-class Report:
-    """A provider's standard report: the same form for every plugin."""
-    source: str
-    title: str
-    plan: str  # its subscription here
-    keys_set: bool | None  # None: it needs none
-    limits: Limits
-    capabilities: tuple[Capability, ...]
-    streams: tuple[tuple[str, str], ...] = ()  # (asset class, what its live stream is)
-    kind: str = ""  # its kind of data (exchange, consolidated, official, vendor)
-    notes: tuple[str, ...] = ()
-    scanned: tuple[tuple[str, bool, str], ...] = ()  # its last capability scan: (what, available, detail)
-    scanned_at: str | None = None
-
-    def as_dict(self) -> dict:
-        return {"source": self.source, "title": self.title, "plan": self.plan, "keysSet": self.keys_set,
-                "kind": self.kind, "notes": list(self.notes), "scannedAt": self.scanned_at,
-                "scanned": [{"what": w, "available": ok, "detail": d} for w, ok, d in self.scanned],
-                "limits": {**self.limits.__dict__, "rate": list(self.limits.rate) if self.limits.rate else None},
-                "capabilities": [{**c.__dict__, "since": str(c.since)} for c in self.capabilities],
-                "streams": [{"asset": a, "what": w} for a, w in self.streams]}
-
-    def lines(self) -> list[str]:
-        """The report for the terminal, the same layout for every provider."""
-        lim = self.limits
-        rate = f", {lim.rate[0]:,} per {lim.rate[1]:g} s" if lim.rate and lim.rate[0] else ""
-        caps = (f"{lim.requests_a_day:,.0f} requests a day{rate}" + (f", {lim.per_run:,} a run" if lim.per_run else "")
-                + (f", {lim.symbols_a_month:,} symbols a month" if lim.symbols_a_month else ""))
-        keys = "" if self.keys_set is None else "; keys set" if self.keys_set else "; keys NOT set"
-        out = [f"{self.source} ({self.title}): plan {self.plan}{keys}; {caps}"
-               + (f"; server: {lim.published}" if lim.published else "")]
-        for c in self.capabilities:
-            fresh = "real time" if c.latency < 60 else f"{c.latency / 60:.0f} min delayed" if c.latency < 86_400 \
-                else "end of day"
-            bars = "whole history a request" if c.per_request is None else f"{c.per_request:,} bars a request"
-            out.append(f"    {c.asset:6} {c.resolution:6} {c.market:12} from {c.since}  {fresh:16} {bars}")
-        out += [f"    {a:6} live   {w}" for a, w in self.streams]
-        out += [f"    note: {n}" for n in self.notes]
-        if self.scanned_at:
-            out.append(f"    scanned {self.scanned_at[:16].replace('T', ' ')}:")
-            out += [f"      {'yes' if ok else 'no ':3} {w}" + (f": {d}" if d else "") for w, ok, d in self.scanned]
-        return out
-
-
 @dataclass(frozen=True, eq=False)
-class Provider:
-    name: str  # the feed's name everywhere: its database file, the watchlist, the ledgers
-    title: str
-    build: Callable[["Settings", int | None], "DataSource"]
-    assets: frozenset  # asset classes it can collect at all (with keys / on some plan)
+class Provider(FeedPlugin):
+    """The record form of a feed plugin (plugin API 1.x, RECORD_API): FeedPlugin's attributes as
+    fields and its hooks as callback fields (None: the contract's default, described at each
+    FeedPlugin method), loaded and asked as any FeedPlugin is (sources/plugin.py). The four fields
+    without a default are required ones (`field()`: the class's attributes are not their defaults)."""
+
+    is_record = True
+
+    name: str = field()  # the feed's name everywhere: its database file, the watchlist, the ledgers
+    title: str = field()
+    build: Callable[["Settings", int | None], "DataSource"] = field()
+    assets: frozenset = field()  # asset classes it can collect at all (with keys / on some plan)
     order: int = 100  # its place in lists (the built-in feeds: 0-60)
     about: str = ""  # one line for menus and lists
     keys: tuple[KeyVar, ...] = ()
@@ -285,163 +234,8 @@ class Provider:
     api: str = "1.0"  # the contract (PLUGIN_API) it was written for: another major is left out
     origin: str = "built in"  # set when loaded: built in, or the package's entry point
 
-    @property
-    def key_names(self) -> tuple[str, ...]:
-        return tuple(n for k in self.keys for n in k.names)
-
-    @property
-    def key_hint(self) -> str:
-        return " and ".join(k.name for k in self.keys)
-
-    def keys_set(self, settings: "Settings") -> bool | None:
-        """Whether its keys are set (None: it needs none). Default: every key's variable has a value."""
-        if not self.keys:
-            return None
-        if self.has_keys:
-            return bool(self.has_keys(settings))
-        return all(k.value(settings.env) for k in self.keys)
-
-    def served(self, settings: "Settings") -> frozenset | None:
-        """The asset classes it collects on this machine; None when it is not set up here at all.
-        Default: all of `assets` with its keys (or needing none), only `keyless` without."""
-        if self.serves:
-            return self.serves(settings)
-        return self.assets if self.keys_set(settings) in (None, True) else frozenset(self.keyless)
-
-    def settings_view(self, base: "Settings") -> "Settings":
-        """The settings as this feed sees them (Settings.for_source): its plan and caps. Default:
-        its fixed `tier` and caps when it has them, otherwise the settings as they are."""
-        if self.view:
-            return self.view(base)
-        if self.tier is None:
-            return base
-        return replace(base, tier=self.tier, max_requests_per_run=self.per_run or base.max_requests_per_run,
-                       max_requests_per_day=self.per_day or base.max_requests_per_day, origin=base)
-
-    def rate_window(self, settings: "Settings") -> tuple[int | None, float]:
-        """The window its limiter keeps: (requests, seconds). Default: its plan's rate a minute."""
-        if self.rate:
-            return self.rate(settings)
-        rpm = settings.for_source(self.name).tier.requests_per_minute
-        return rpm, minute_window(rpm)
-
-    def market_of(self, settings: "Settings") -> dict[str, str]:
-        """Which market each of its asset classes is (feeds of one market are copies of each other:
-        one download per span between them). Default: each class its own market, named after the feed."""
-        return self.markets(settings) if self.markets else {a: self.name for a in self.assets}
-
-    def can_carry(self, spec) -> bool:
-        """Whether it can hold a symbol at all: its asset class, then its own list (`carries`) or,
-        for a stock, the exchanges it declares (1.12): none, the US alone (a stock feed from before);
-        some, exactly those, with "US" standing for every US listing (Tiingo: "US", XSHG, XSHE;
-        TWSE: XTAI)."""
-        if spec.asset not in self.assets:
-            return False
-        if self.carries is not None:
-            return bool(self.carries(spec))
-        if spec.asset != "stock":
-            return True
-        if not self.exchanges:
-            return not is_foreign(spec.exchange)
-        return spec.exchange in self.exchanges if is_foreign(spec.exchange) else "US" in self.exchanges
-
-    def kind_for(self, asset: str) -> str:
-        return self.kind_by_asset.get(asset) or self.kind
-
-    def resolutions_for(self, tier: "Tier", asset: str) -> tuple[str, ...]:
-        """The resolutions its plan (`tier`) provides for an asset class. Default: `provides`, or day
-        and minute for each of its asset classes."""
-        if asset not in self.assets:
-            return ()
-        if self.plan_resolutions:
-            return tuple(self.plan_resolutions(tier, asset))
-        return tuple(self.provides.get(asset, ("day", "minute")))
-
-    def run_scan(self, source: "DataSource", settings: "Settings | None" = None) -> Scanned:
-        """Its capability scan, its plan held to its own plan variables (a plugin sets no other's),
-        and its limits verified: the rate-limit headers its server sent on the scan's requests,
-        against the window its limiter keeps (with `settings`)."""
-        out = self.scan(source) if self.scan else ()
-        rows, plan, alike = (out.results, out.plan, out.alike) if isinstance(out, Scanned) else (out, {}, {})
-        plan = {k: str(v) for k, v in (plan or {}).items() if k in self.plan_vars and v}
-        rows = [(str(w), bool(ok), str(d)) for w, ok, d in rows]
-        limits = self.limits_found(source, settings)
-        rows.append(limits.pop("row"))
-        return Scanned(tuple(rows), plan, {k: tuple(str(x) for x in v) for k, v in (alike or {}).items() if k in plan},
-                       limits)
-
-    def limits_found(self, source, settings: "Settings | None" = None) -> dict:
-        """Its server's rate limit from the headers it sent (source.client.limits_seen), a minute's,
-        beside the window kept: {seen, perMinute, kept, row} (row: the scan's line for it)."""
-        seen = dict(getattr(getattr(source, "client", None), "limits_seen", None) or {})
-        found = server_limits(seen)
-        per_minute = server_per_minute(seen)
-        kept = list(self.rate_window(settings)) if settings is not None else None
-        said = "; ".join(_per(q, w) for q, w in found)
-        if not found:
-            row = ("its server's rate limit", True, "not sent in its answers: its own published limits are kept"
-                   + (f" ({self.limits})" if self.limits else ""))
-        elif kept is None or within(kept[0], kept[1], found) == tuple(kept):
-            row = ("its server's rate limit", True, said + (f"; {_per(*kept)} kept, inside it" if kept and kept[0] else ""))
-        else:
-            row = ("its server's rate limit", False, f"{said}: " + (f"tighter than the {_per(*kept)} kept" if kept[0]
-                                                                     else "its plan keeps no limit")
-                   + "; its server's is used from now on (a little inside it)")
-        return {"seen": seen, "perMinute": per_minute, "kept": kept, "row": row}
-
-    def plan_state(self, settings: "Settings") -> list[dict]:
-        """Each of its plan variables: its value here and where it comes from (the user's own
-        setting, its scan, or the default when neither set it), its choices."""
-        mine = settings.variables or {}
-        found = settings.detected or {}
-        out = []
-        for v in self.plan_vars:
-            choices = list(self.plan_choices.get(v, ()))
-            out.append({"name": v, "value": mine.get(v) or found.get(v) or (choices[0] if choices else None),
-                        "origin": "you" if mine.get(v) else "scan" if found.get(v) else "default", "choices": choices})
-        return out
-
-    def request_bars(self, resolution: str) -> int | None:
-        """Bars one request returns (None: a symbol's whole history at once). Default: 1,000."""
-        return self.per_request.get(resolution, DEFAULT_PER_REQUEST)
-
-    def report(self, profile, today, settings: "Settings | None" = None, scanned: dict | None = None) -> Report:
-        """Its standard report on this machine: `profile` is its coverage.FeedProfile (plan, asset
-        classes served, markets, capacity); `settings` add its caps and keys (the scheme needs neither);
-        `scanned`, its last capability scan ({at, results})."""
-        from ..collector import history_floor
-        from ..coverage import latency
-
-        caps = []
-        for asset in sorted(profile.assets):
-            for res in self.resolutions_for(profile.tier, asset):
-                since = history_floor(profile.tier, today, asset)
-                if res == "second":
-                    since = max(since, today - timedelta(days=profile.second_days))
-                caps.append(Capability(asset, res, profile.venues.get(asset) or self.name, since,
-                                       latency(profile.tier, asset), self.request_bars(res)))
-        view = settings.for_source(self.name) if settings is not None else None
-        limits = Limits(profile.capacity if profile.capacity is not None else float(view.max_requests_per_day if view else 0),
-                        per_day=view.max_requests_per_day if view else None,
-                        per_run=view.max_requests_per_run if view else None,
-                        rate=rate_window(self.name, settings) if settings is not None else None,  # its server's lower one too
-                        symbols_a_month=self.symbols_per_month, published=self.limits)
-        out = Report(self.name, self.title, profile.tier.name, self.keys_set(settings) if settings is not None else None,
-                     limits, tuple(caps), tuple((a, w) for a, w in self.streams.items() if a in profile.assets),
-                     self.kind, ("a closed archive: each symbol filled once, then not asked again",) if self.archival else (),
-                     tuple((str(w), bool(ok), str(d)) for w, ok, d in (scanned or {}).get("results", [])),
-                     (scanned or {}).get("at"))
-        return self.reporter(out, settings) if self.reporter else out
-
 
 # -- helpers for building a provider's client ----------------------------------------------------
-
-def minute_window(rpm: int | None) -> float:
-    """The seconds a limiter of `rpm` requests a minute keeps them in. A few a minute (Massive's
-    free classes: 5): a couple of seconds' margin, so jitter between sending and arriving never
-    puts six in the server's minute."""
-    return 62.0 if rpm and rpm <= 10 else 60.0
-
 
 def limiter(name: str, settings: "Settings", key: str | None = None) -> RateLimiter:
     """A feed's limiter, its window kept for the whole machine (every process and database on it)
@@ -480,75 +274,6 @@ def rate_window(name: str, settings: "Settings") -> tuple[int | None, float]:
     return within(n, seconds, found_limits(name, settings))
 
 
-SERVER_SHARE = 0.95  # of a server's own limit, when it is below the window a plugin keeps
-
-
-def within(n: int | None, seconds: float, limits: list[tuple[float, float]]) -> tuple[int | None, float]:
-    """A window (n requests in `seconds`; n None: no limit) kept within SERVER_SHARE of each server
-    limit (requests, seconds): on average under the lowest rate of them, and n at once under each
-    shorter window's. Unchanged when it already is. A few a second becomes one in a longer window,
-    never rounded up to one a second (that was twice a server's 30 a minute)."""
-    if not limits:
-        return n, seconds
-    rate = min(q / w for q, w in limits) * SERVER_SHARE  # requests a second
-    if n is not None and n / seconds <= rate + 1e-9 and all(n <= q * SERVER_SHARE for q, w in limits if w <= seconds):
-        return n, seconds
-    seconds = min(seconds or 60.0, min(w for _, w in limits))
-    n = int(rate * seconds + 1e-9)
-    if n < 1:
-        n, seconds = 1, float(math.ceil(1 / rate))
-    return n, float(seconds)
-
-
-def server_limits(seen: Mapping[str, str]) -> list[tuple[float, float]]:
-    """Each limit a server's rate-limit headers give, as (requests, seconds): X-RateLimit-Limit, a
-    minute's (Alpaca's, the one feed known to send it); the IETF draft's RateLimit-Policy, each of
-    its policies ("10;w=1, 1000;w=3600", or '"default";q=100;w=60'), else its RateLimit-Limit, a
-    minute's when no window is said."""
-    def number(text) -> float | None:
-        try:
-            return float(str(text).strip().strip('"'))
-        except (TypeError, ValueError):
-            return None
-
-    low = {k.lower(): v for k, v in seen.items()}
-    out: list[tuple[float, float]] = []
-    x = number(str(low.get("x-ratelimit-limit", "")).split(",")[0].split(";")[0])
-    if x:
-        out.append((x, 60.0))
-    policies = []
-    for part in str(low.get("ratelimit-policy") or "").split(","):
-        bits = [b.strip() for b in part.split(";") if b.strip()]
-        if not bits:
-            continue
-        q = next((number(b[2:]) for b in bits if b.startswith("q=")), None) or number(bits[0])
-        w = next((number(b[2:]) for b in bits if b.startswith("w=")), None) or 60.0
-        if q:
-            policies.append((q, w))
-    if policies:
-        out += policies
-    else:
-        limit = number(str(low.get("ratelimit-limit", "")).split(",")[0].split(";")[0])
-        if limit:
-            out.append((limit, 60.0))
-    return [(q, w) for q, w in out if q > 0 and w > 0]
-
-
-def server_per_minute(seen: Mapping[str, str]) -> float | None:
-    """The lowest rate a server's rate-limit headers give, a minute's (server_limits), or None."""
-    found = server_limits(seen)
-    if not found:
-        return None
-    pm = min(q * 60 / w for q, w in found)
-    return int(pm) if pm == int(pm) else round(pm, 3)
-
-
-def _per(q: float, w: float) -> str:
-    """A limit in words: "200 a minute", "50 an hour", "10 a second", "3 per 7 s"."""
-    words = {1.0: "a second", 60.0: "a minute", 3600.0: "an hour", 86400.0: "a day"}
-    return f"{q:,.0f} {words[float(w)]}" if float(w) in words else f"{q:,.0f} per {w:,.0f} s"
-
-
 def sharing(name: str) -> list[str]:
     """The feeds whose requests count against the same account as `name`'s, its own included
     (Provider.account: Blue Ocean's on Alpaca's key)."""
@@ -579,22 +304,31 @@ def scan_limits(db_path, name: str) -> list[tuple[float, float]]:
 # -- the registry ----------------------------------------------------------------------------------
 
 _lock = threading.RLock()
-_providers: dict[str, Provider] | None = None
-_publishers: dict[str, Publisher] = {}
+_providers: dict[str, FeedPlugin] | None = None
+_publishers: dict[str, PublisherPlugin] = {}
 _errors: list[tuple[str, str]] = []
 
+NAMES = ("PLUGIN", "PUBLISHER", "ASSISTANT")  # what a module calls its plugin (the plural: several)
 
-def _plugins_in(module, origin: str) -> list[Provider | Publisher]:
-    """A module's plugins: its feed (`PLUGIN`, `PLUGINS`: Providers) and its publishers
-    (`PUBLISHER`, `PUBLISHERS`: sources.publisher.Publisher), at least one of them."""
-    if isinstance(module, (Provider, Publisher)):
-        return [replace(module, origin=origin)]
-    found = list(getattr(module, "PLUGINS", ())) + list(getattr(module, "PUBLISHERS", ()))
-    found += [p for p in (getattr(module, "PLUGIN", None), getattr(module, "PUBLISHER", None))
-              if isinstance(p, (Provider, Publisher))]
-    if not found or not all(isinstance(p, (Provider, Publisher)) for p in found):
-        raise TypeError("defines no PLUGIN (a sources.registry.Provider) nor PUBLISHER (a sources.publisher.Publisher)")
-    return [replace(p, origin=origin) for p in found]
+
+def _is_plugin_class(x) -> bool:
+    return isinstance(x, type) and issubclass(x, Plugin)
+
+
+def _plugins_in(module, origin: str) -> list[Plugin]:
+    """A module's plugins: its feed (`PLUGIN`, `PLUGINS`), its publishers (`PUBLISHER`, `PUBLISHERS`)
+    and its assistants (`ASSISTANT`, `ASSISTANTS`), at least one of them; each an instance of a
+    Plugin subclass (a Provider or a Publisher record among them) or the subclass itself,
+    instantiated here. An entry point may point at the instance or the class instead of a module."""
+    if isinstance(module, Plugin) or _is_plugin_class(module):
+        return _plugins_in(SimpleNamespace(PLUGIN=module), origin)
+    found = [p for name in NAMES for p in getattr(module, name + "S", ())]
+    found += [p for p in (getattr(module, name, None) for name in NAMES) if isinstance(p, Plugin) or _is_plugin_class(p)]
+    if not found or not all(isinstance(p, Plugin) or _is_plugin_class(p) for p in found):
+        raise TypeError("defines no PLUGIN (a FeedPlugin: a class, an instance, or a sources.registry.Provider record) "
+                        "nor PUBLISHER (a PublisherPlugin, or a sources.publisher.Publisher record) nor ASSISTANT "
+                        "(an AssistantPlugin)")
+    return [(p() if _is_plugin_class(p) else p).with_(origin=origin) for p in found]
 
 
 def _entry_points() -> Iterable:
@@ -625,11 +359,11 @@ def _load(where: str, load: Callable[[], object], origin: str, version: str,
         errors.append((where, f"{type(e).__name__}: {e}"))
         return
     for p in plugins_:
-        why = api_refusal(p.api)
+        why = api_refusal(p.api, record=p.is_record)
         if why:
             errors.append((where, f"{p.name}: {why}"))
         else:
-            found.append(p if p.version or not version else replace(p, version=version))
+            found.append(p if p.version or not version else p.with_(version=version))
 
 
 def plugin_checkouts(folder: Path) -> list[tuple[str, Path, str, str]]:
@@ -679,7 +413,7 @@ def _directory_plugins(found: list, errors: list[tuple[str, str]]) -> set[str]:
     return loaded
 
 
-def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
+def discover() -> tuple[dict[str, FeedPlugin], list[tuple[str, str]]]:
     """Every provider plugin: the built-in modules, the plugin directory's checkouts, then the
     installed packages' entry points. Returns (providers by name in their order, [(where, why)]
     for the ones left out)."""
@@ -687,13 +421,13 @@ def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
     return providers_, errors_
 
 
-def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tuple[str, str]]]:
+def discover_all() -> tuple[dict[str, FeedPlugin], dict[str, PublisherPlugin], list[tuple[str, str]]]:
     """The providers and the publishers (both by name, in their order), and the plugins left out:
     one that fails to load, one written for a contract this app does not offer (api_refusal), a
     second of one name."""
     from . import plugins
 
-    found: list[Provider | Publisher] = []
+    found: list[Plugin] = []
     errors: list[tuple[str, str]] = []
     for info in sorted(pkgutil.iter_modules(plugins.__path__), key=lambda m: m.name):
         where = f"{plugins.__name__}.{info.name}"
@@ -705,8 +439,8 @@ def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tupl
         dist, version = _distribution(ep)
         _load(f"{ep.name} ({ep.value})", ep.load, f"package: {dist} ({ep.value})" if dist else f"package: {ep.value}",
               version, found, errors)
-    out: dict[str, Provider] = {}
-    pubs: dict[str, Publisher] = {}
+    out: dict[str, FeedPlugin] = {}
+    pubs: dict[str, PublisherPlugin] = {}
     keys: dict[str, str] = {}  # a feed's key -> its publisher (keys name the state kept)
     sets: dict[str, str] = {}  # a dataset's name -> its publisher (names its state and versions)
     lives: dict[str, str] = {}  # a live feed's name -> its provider (names its bars, status and kills)
@@ -714,18 +448,18 @@ def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tupl
     # the built-ins first, so an installed package never takes the name, a feed or a dataset of one
     # (whatever its order); all listed in their order after
     for p in sorted(found, key=lambda p: (p.origin != "built in", p.order, p.name)):
-        mine = pubs if isinstance(p, Publisher) else out
+        mine = pubs if isinstance(p, PublisherPlugin) else out
         if p.name in out or p.name in pubs:
             first = (out.get(p.name) or pubs[p.name]).origin
-            kind = "publisher" if isinstance(p, Publisher) else "provider"
+            kind = "publisher" if isinstance(p, PublisherPlugin) else "provider"
             errors.append((p.origin, f"a second {kind} named {p.name!r}: the first kept ({first})"))
             continue
-        why = _databases_refused(p.databases)
+        why = p.refusal()
         if why:
-            kind = "publisher" if isinstance(p, Publisher) else "provider"
+            kind = "publisher" if isinstance(p, PublisherPlugin) else "provider"
             errors.append((p.origin, f"{kind} {p.name!r}: {why}"))
             continue
-        if isinstance(p, Publisher):
+        if isinstance(p, PublisherPlugin):
             clash = next((f.key for f in p.feeds if f.key in keys), None)
             if clash:
                 errors.append((p.origin, f"publisher {p.name!r}: feed {clash!r} is {keys[clash]!r}'s already"))
@@ -744,30 +478,24 @@ def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tupl
         else:
             # a live feed's name is its own provider's, or a name no other provider has
             clash = next((x.name for x in p.live if lives.get(x.name, p.name) != p.name
-                          or (x.name != p.name and x.name in {q.name for q in found if isinstance(q, Provider)})), None)
+                          or (x.name != p.name and x.name in {q.name for q in found if isinstance(q, FeedPlugin)})), None)
             if clash:
                 errors.append((p.origin, f"provider {p.name!r}: live feed {clash!r} is {lives.get(clash, clash)!r}'s"))
                 continue
             lives.update({x.name: p.name for x in p.live})
         mine[p.name] = p
+    from ..freshness import DELAYS  # when loaded, not on import: the freshness rules import the calendars
+
+    for p in out.values():
+        DELAYS.declare(p)  # its own publication delays and market hours (2.0)
     in_order = lambda d: dict(sorted(d.items(), key=lambda kv: (kv[1].order, kv[0])))  # noqa: E731
     return in_order(out), in_order(pubs), errors
 
 
-def _databases_refused(dbs: Iterable[Database]) -> str | None:
-    """Why a plugin's own databases are refused (API 1.8): an engine the app has not, a server off this
-    machine, a path out of the data folder, or the app's own file (the main one, gov.db) not declared
-    shared."""
-    for d in dbs:
-        why = layout.not_here(d)
-        if why:
-            return why
-        if not d.shared and d.where in (layout.MAIN, layout.GOV):
-            return f"{d.where}: the app's file, every plugin's (declare it shared)"
-    return None
+_databases_refused = databases_refused  # its name before 2.0 (sources/plugin.py: Plugin.refusal)
 
 
-def providers() -> dict[str, Provider]:
+def providers() -> dict[str, FeedPlugin]:
     """The providers by name, in their order (found once a process; `reload()` looks again)."""
     global _providers
     with _lock:
@@ -779,7 +507,7 @@ def providers() -> dict[str, Provider]:
         return _providers
 
 
-def publishers() -> dict[str, Publisher]:
+def publishers() -> dict[str, PublisherPlugin]:
     """The publisher plugins by name, in their order (found with the providers)."""
     with _lock:
         providers()
@@ -821,7 +549,7 @@ def plugin_keys(name: str) -> list[KeyVar]:
     return list(out.values())
 
 
-def reload() -> dict[str, Provider]:
+def reload() -> dict[str, FeedPlugin]:
     global _providers
     with _lock:
         _providers = None
@@ -831,19 +559,19 @@ def reload() -> dict[str, Provider]:
 def leave_out(name: str, why: str) -> None:
     """A plugin found unusable after loading (its settings builder raised: config.load_settings) is
     left out as one that fails to load is: it and the feeds part of it go from providers(), its
-    publishers from publishers(), and the cause into errors()."""
+    publishers (itself, when it is one) from publishers(), and the cause into errors()."""
     with _lock:
-        p = providers().get(name)
+        p = providers().get(name) or _publishers.get(name)
         if p is None:
             return
         for feed in plugin_feeds(name):
             _providers.pop(feed, None)
-        for pub in [n for n, q in _publishers.items() if name in (q.part_of, q.account)]:
+        for pub in [n for n, q in _publishers.items() if name in (n, q.part_of, q.account)]:
             _publishers.pop(pub)
         _errors.append((p.origin, f"{name}: {why}"))
 
 
-def get(name: str) -> Provider | None:
+def get(name: str) -> FeedPlugin | None:
     return providers().get(name)
 
 
@@ -918,7 +646,7 @@ def plugin_databases(name: str) -> list[Database]:
         main.append("its fetched files' ledger")
     readers = [pubs[n] for n in parts if pubs[n].feeds]
     if readers:
-        own = [q.title for q in readers if q.read is None]
+        own = [q.title for q in readers if not q.reads_itself]
         found.append(Database(layout.GOV, (f"what {_and(own)} read" + ", and " if own else "")
                               + "the reads' record: requests, robots.txt, rechecks", shared=True))
         # its documents when its documents store is MongoDB (stores.py): the server here, the app's database
@@ -926,7 +654,7 @@ def plugin_databases(name: str) -> list[Database]:
         if own:
             found.append(Database(server + "gov_items", f"what {_and(own)} read, when its documents are in MongoDB",
                                   shared=True))
-        if any(q.read is not None for q in readers):
+        if any(q.reads_itself for q in readers):
             found.append(Database(server + "news", "its headlines, when its documents are in MongoDB", shared=True))
     declared += [d for n in parts for d in pubs[n].databases]
     found += [d for d in declared if d.where != layout.MAIN]
@@ -948,7 +676,7 @@ def label(name: str) -> str:
     return f"{owner} ({providers()[name].title.lower()})" if owner != name else name
 
 
-def live_feeds() -> dict[str, tuple[Provider, Live]]:
+def live_feeds() -> dict[str, tuple[FeedPlugin, Live]]:
     """Every live feed the plugins declare, by its name: (its provider, the feed), in their order."""
     return {x.name: (p, x) for p in providers().values() for x in p.live}
 
@@ -996,7 +724,7 @@ def menu(settings: "Settings | None" = None) -> list[dict]:
                "keys": [key_row(k) for k in plugin_keys(p.name)],
                "publishers": [_publisher_row(publishers()[n]) for n in publisher_parts(p.name)],
                "planChoices": [{"name": v, "choices": list(c)} for v, c in p.plan_choices.items()],
-               "planNote": p.plan_note, "scan": p.scan is not None, "feeds": [],
+               "planNote": p.plan_note, "scan": p.has_scan, "feeds": [],
                "databases": [database_row(d) for d in plugin_databases(p.name)]}
         for n in plugin_feeds(p.name)[1:]:
             f = providers()[n]
@@ -1028,7 +756,7 @@ def database_row(d: Database, main=None) -> dict:
     return row
 
 
-def _publisher_row(p: Publisher) -> dict:
+def _publisher_row(p: PublisherPlugin) -> dict:
     return {"name": p.name, "title": p.title, "about": p.about, "kind": p.kind, "account": p.account,
             "origin": p.origin, "version": p.version, "api": p.api, "datasets": list(p.dataset_names),
             "keys": [key_row(k) for k in p.keys], "databases": [database_row(d) for d in plugin_databases(p.name)]}

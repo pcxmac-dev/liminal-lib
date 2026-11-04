@@ -333,7 +333,7 @@ class Reader:
             return last + max(floor, timedelta(minutes=wait) if wait is not None
                               else min(every, timedelta(minutes=FAILED_RETRY_MINUTES)))
         out = last + max(every, floor)
-        if pub.moments and feed.moments:
+        if pub.has_moments and feed.moments:
             moment = next_moment(pub, last, out)
             if moment is not None:
                 out = min(out, max(moment, last + floor))
@@ -612,7 +612,7 @@ class Reader:
     def _read_vendor(self, pub: Publisher, feed: Feed, now: datetime) -> int:
         from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError, Unauthorized
 
-        if pub.read is None or self.store is None:
+        if not pub.reads_itself or self.store is None:
             return 0
         if self._spent(pub, feed, now):
             return 0
@@ -725,7 +725,7 @@ STATE_ORDER = ("paused", "refused", "failing", "waiting", "ready", "off")
 
 def _calendar(pub: Publisher, now: datetime) -> list[dict]:
     """Its next releases (at most four), from its calendar; a plugin's calendar that fails shows none."""
-    if not pub.calendar:
+    if not pub.has_calendar:
         return []
     try:
         out = [c for c in pub.calendar(now.date()) if datetime.fromisoformat(c["when"]) > now]
@@ -823,7 +823,7 @@ def _publisher_view(reader: Reader, gdb: gov.GovDB, pub: Publisher, now: datetim
 def _today_moments(pub: Publisher, now: datetime) -> list[datetime]:
     from .sessions import ET
 
-    return sorted(pub.moments(now.astimezone(ET).date())) if pub.moments else []
+    return sorted(pub.moments(now.astimezone(ET).date())) if pub.has_moments else []
 
 
 class _NoSession:

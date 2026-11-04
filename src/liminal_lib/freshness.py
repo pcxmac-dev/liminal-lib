@@ -95,15 +95,54 @@ PLAN_DELAYS["cboe-futures"] = {"future": Delay("eod")}
 FEED_HOURS = {"boats": {"stock": "overnight"}}
 
 
+class Delays:
+    """The publication delays of every plan and the market hours of every feed: what the library
+    holds (PLAN_DELAYS, FEED_HOURS) and what each feed plugin declares of its own when it loads
+    (FeedPlugin.delays and hours, plugin API 2.0: `declare`, from the registry)."""
+
+    def __init__(self, plans: dict[str, dict[str, Delay]], feed_hours: dict[str, dict[str, str]]):
+        self.plans = plans  # tier name -> asset class -> Delay
+        self.feed_hours = feed_hours  # feed -> asset class -> the calendar it keeps (MarketCalendar's kinds)
+
+    def of(self, tier: Tier, asset: str) -> Delay:
+        """A plan's publication delay for an asset class (end of day where neither says)."""
+        tier = asset_tier(tier, asset)  # Massive: each asset class on its own plan
+        return self.plans.get(tier.name, self.plans["free"]).get(asset, Delay("eod"))
+
+    def hours(self, feed: str | None, asset: str) -> str:
+        """The calendar a feed's asset class keeps (what `expected`, `history_horizon` and the coverage
+        planner take as the asset): its market's own hours, else the asset class's."""
+        return self.feed_hours.get(feed or "", {}).get(asset, asset)
+
+    def declare(self, plugin) -> bool:
+        """A feed plugin's own rows (its `delays`: tier name -> asset -> Delay; its `hours`: asset ->
+        calendar), kept here under its names. Returns whether anything changed (the expectations
+        cached are from before then, and cleared)."""
+        changed = False
+        for tier, by_asset in (getattr(plugin, "delays", None) or {}).items():
+            rows = dict(by_asset)
+            if self.plans.get(tier) != rows:
+                self.plans[tier] = rows
+                changed = True
+        hours = dict(getattr(plugin, "hours", None) or {})
+        if hours and self.feed_hours.get(plugin.name) != hours:
+            self.feed_hours[plugin.name] = hours
+            changed = True
+        if changed:
+            expected.cache_clear()
+        return changed
+
+
+DELAYS = Delays(PLAN_DELAYS, FEED_HOURS)
+
+
 def hours(feed: str | None, asset: str) -> str:
-    """The calendar a feed's asset class keeps (what `expected`, `history_horizon` and the coverage
-    planner take as the asset): its market's own hours (FEED_HOURS), else the asset class's."""
-    return FEED_HOURS.get(feed or "", {}).get(asset, asset)
+    """The calendar a feed's asset class keeps (Delays.hours)."""
+    return DELAYS.hours(feed, asset)
 
 
 def plan_delay(tier: Tier, asset: str) -> Delay:
-    tier = asset_tier(tier, asset)  # Massive: each asset class on its own plan
-    return PLAN_DELAYS.get(tier.name, PLAN_DELAYS["free"]).get(asset, Delay("eod"))
+    return DELAYS.of(tier, asset)
 
 
 # A plan that publishes as it trades may not have sent its newest minute yet, and late prints still

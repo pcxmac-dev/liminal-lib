@@ -5,10 +5,10 @@ from __future__ import annotations
 from ..config import Settings
 from ..coverage import FeedProfile
 from .base import RESOLUTIONS, DataSource
-from .registry import KeyVar, Provider, minute_window, providers, publishers, rate_window
+from .registry import FeedPlugin, KeyVar, Provider, minute_window, providers, publishers, rate_window
 
 
-def provider(name: str) -> Provider:
+def provider(name: str) -> FeedPlugin:
     p = providers().get(name)
     if p is None:
         raise ValueError(f"unknown source {name!r}; available: {', '.join(providers())}")
@@ -65,7 +65,7 @@ def build_source(name: str, settings: Settings, request_budget: int | None = Non
 
 
 __all__ = ["RESOLUTIONS", "DataSource",
-           "KeyVar", "Provider", "providers", "provider", "is_archive", "build_source", "feed_profiles", "supports",
+           "KeyVar", "FeedPlugin", "Provider", "providers", "provider", "is_archive", "build_source", "feed_profiles", "supports",
            "markets", "rate_window", "minute_window", "publishers"]
 
 

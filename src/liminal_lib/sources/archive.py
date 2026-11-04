@@ -1,16 +1,22 @@
 """What the public feeds' sources share (plugin API 1.6): a closed archive's or a keyless exchange's
 DataSource (Archive), time spans in ms, the well-known crypto pairs the exchanges list and a crypto
-exchange's settings (venue_view)."""
+exchange's settings (venue_view); and what their plugins are (2.0): PublicFeedPlugin, a keyless
+feed's on the contract's public client, and CryptoVenuePlugin, a crypto exchange's."""
 from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from ..errors import NotEntitled
 from ..models import Instrument
 from .base import DataSource
 from .http import PublicClient
+from .plugin import FeedPlugin
+
+if TYPE_CHECKING:
+    from ..config import Settings
 
 ET = ZoneInfo("America/New_York")
 EXCHANGE_FRAMES = (("minute", 5), ("hour", 1))  # the crypto exchanges' own candles above a minute
@@ -85,3 +91,33 @@ def venue_view(name: str):
                        max_requests_per_day=p.per_day or base.max_requests_per_day, origin=base)
 
     return view
+
+
+class PublicFeedPlugin(FeedPlugin):
+    """A keyless public feed's plugin (plugin API 2.0): its source (`source_class`, an Archive or
+    another DataSource taking the client) built on the contract's public client at `base_url`, its
+    limits per address (the machine's: registry.public_client). The feed's plan and caps are its
+    fixed `tier`, `per_run` and `per_day` (FeedPlugin.view)."""
+
+    base_url: str = ""
+    source_class: "type[DataSource] | None" = None  # a class (a function here would bind as a method)
+
+    def build(self, settings: "Settings", request_budget: int | None) -> DataSource:
+        from .registry import public_client  # when asked, not on import: the registry imports the plugins
+
+        if self.source_class is None:
+            raise NotImplementedError(f"{self.name}: no source_class (the DataSource its client goes to)")
+        return self.source_class(public_client(self.name, self.base_url, settings, request_budget))
+
+
+class CryptoVenuePlugin(PublicFeedPlugin):
+    """A crypto exchange's public candles (plugin API 2.0; venue_view's rule as a class): the
+    exchange's own data, all the history it holds unless CRYPTO_VENUE_DAYS limits it."""
+
+    assets = frozenset({"crypto"})
+    kind = "exchange"
+
+    def view(self, base: "Settings") -> "Settings":
+        tier = replace(self.tier, history_days=base.crypto_venue_days) if base.crypto_venue_days else self.tier
+        return replace(base, tier=tier, max_requests_per_run=self.per_run or base.max_requests_per_run,
+                       max_requests_per_day=self.per_day or base.max_requests_per_day, origin=base)

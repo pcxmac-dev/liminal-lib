@@ -357,7 +357,7 @@ def upcoming(publishers, today, now: datetime | None = None) -> list[dict]:
     soonest first: [{when, what, publisher}]; with `now`, only those still to come."""
     out = []
     for p in publishers.values():
-        if not p.calendar:
+        if not p.has_calendar:
             continue
         try:  # one plugin's calendar that fails (a naive time, a malformed entry) shows none, the others still do
             out += [{**c, "publisher": p.title} for c in p.calendar(today)

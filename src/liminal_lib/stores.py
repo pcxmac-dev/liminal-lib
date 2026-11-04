@@ -139,11 +139,11 @@ def document_scopes(name: str) -> list[tuple[documents.Kind, dict]]:
 
     pubs = publishers()
     parts = [pubs[n] for n in (name, *publisher_parts(name)) if n in pubs]
-    keys = [f.key for p in parts if p.read is None for f in p.feeds]
+    keys = [f.key for p in parts if not p.reads_itself for f in p.feeds]
     out = []
     if keys:
         out.append((documents.GOV_ITEMS, {"source": keys}))
-    if any(p.read is not None for p in parts):
+    if any(p.reads_itself for p in parts):
         out.append((documents.NEWS, {"source": [name]}))
     return out
 

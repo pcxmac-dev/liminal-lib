@@ -2,8 +2,9 @@
 releases, rates), read on a schedule of its own by the recorder (publications.py), never behind a
 sync; and the datasets it puts out (sources/dataset.py), fetched by `datasets` (datasets.py).
 
-A module in `sources/plugins/` defines `PUBLISHER` (a Publisher; `PUBLISHERS` for several), beside
-or instead of a feed's `PLUGIN`: the federal agencies are parts of one plugin (the liminal-plugin-federal
+A plugin's module defines `PUBLISHER` (a PublisherPlugin, plugin API 2.0: a subclass or an instance;
+the record form `Publisher`, 1.x; `PUBLISHERS` for several), beside or instead of a feed's `PLUGIN`:
+the federal agencies are parts of one plugin (the liminal-plugin-federal
 package, a module each: fed.py, sec.py ...; `part_of`), a vendor's headlines sit in its feed's module
 (massive.py), its requests on that feed's account, and a library of datasets is a publisher with no
 feeds (the French and Datahub packages; the CFTC's in Federal).
@@ -31,6 +32,7 @@ from ..layout import Database
 from .dataset import Dataset
 from .fetching import Fetcher
 from .keys import KeyVar
+from .plugin import Plugin
 
 
 @dataclass
@@ -69,13 +71,84 @@ class Policy:
     terms_url: str = ""
 
 
+class PublisherPlugin(Plugin):
+    """A publisher's plugin: what an agency, a vendor or a researcher publishes for programs (the
+    module's docstring), its feeds and scrape checks, its datasets; the hooks `moments` (extra reads
+    at its release moments), `calendar` (its scheduled releases, for the views) and `read` (a
+    vendor's own read, where the reader's RSS, Atom and JSON readers do not fit), each the
+    contract's default here (none: `has_moments`, `has_calendar`, `reads_itself`)."""
+
+    CONTRACT = True
+    KIND = "publisher"
+
+    feeds: tuple[Feed, ...] = ()
+    policy: Policy = Policy()
+    # official (an agency) | vendor (a data vendor's headlines, on its feed's account) | research (a
+    # researcher's own library: Ken French's) | mirror (someone else's data republished: Datahub's)
+    kind: str = "official"
+    # the datasets it publishes (the CFTC's Commitments of Traders): fetched by `datasets`, shown with
+    # it. API 1.4: each a Dataset (sources/dataset.py), declared here, its files only from its hosts and
+    # stopped by its pause; a name (API 1.2) lists one another plugin declares
+    datasets: tuple["Dataset | str", ...] = ()
+
+    # -- the hooks, each the contract's default here -----------------------------------------------
+
+    def moments(self, day: date) -> tuple[datetime, ...]:
+        """Extra reads at its release moments: the times (ET, aware) on a day it publishes at a set
+        time (the FOMC's statement at 2:00 p.m. on decision days). Default: none."""
+        return ()
+
+    def calendar(self, today: date) -> list[dict]:
+        """Its scheduled releases from a day on, for the views: [{"when": iso, "what": str}].
+        Default: none."""
+        return []
+
+    def read(self, ctx) -> int:
+        """A vendor's own read: new items saved; `ctx` a publications.Context (its feed and
+        publisher, the settings, the store, the moment, a log, the request counter). The contract
+        has none: an official feed is read by the reader itself (RSS, Atom, Feed.parse)."""
+        raise NotImplementedError(f"{self.name}: read by the app's reader, no read of its own")
+
+    @property
+    def has_moments(self) -> bool:
+        return self.gives("moments")
+
+    @property
+    def has_calendar(self) -> bool:
+        return self.gives("calendar")
+
+    @property
+    def reads_itself(self) -> bool:
+        """Whether it reads its feeds itself (`read`: a vendor's headlines through its feed's client)
+        rather than through the reader: its items are then the main file's news, not gov.db's."""
+        return self.gives("read")
+
+    def feed(self, key: str) -> Feed | None:
+        return next((f for f in self.feeds if f.key == key), None)
+
+    @property
+    def dataset_names(self) -> tuple[str, ...]:
+        return tuple(d if isinstance(d, str) else d.name for d in self.datasets)
+
+    @property
+    def declared(self) -> tuple["Dataset", ...]:
+        """The datasets it declares itself (not those it only names)."""
+        return tuple(d for d in self.datasets if not isinstance(d, str))
+
+
 @dataclass(frozen=True)
-class Publisher:
-    name: str
-    title: str
-    about: str
-    feeds: tuple[Feed, ...]
-    policy: Policy
+class Publisher(PublisherPlugin):
+    """The record form of a publisher plugin (plugin API 1.x, RECORD_API): PublisherPlugin's
+    attributes as fields and its hooks as callback fields (None: the contract's default), loaded and
+    asked as any PublisherPlugin is. The five fields without a default are required (`field()`)."""
+
+    is_record = True
+
+    name: str = field()
+    title: str = field()
+    about: str = field()
+    feeds: tuple[Feed, ...] = field()
+    policy: Policy = field()
     order: int = 100
     # official (an agency) | vendor (a data vendor's headlines, on its feed's account) | research (a
     # researcher's own library: Ken French's) | mirror (someone else's data republished: Datahub's)
@@ -111,19 +184,6 @@ class Publisher:
     version: str = ""
     api: str = "1.0"
     origin: str = "built in"  # set when loaded
-
-    def feed(self, key: str) -> Feed | None:
-        return next((f for f in self.feeds if f.key == key), None)
-
-    @property
-    def dataset_names(self) -> tuple[str, ...]:
-        return tuple(d if isinstance(d, str) else d.name for d in self.datasets)
-
-    @property
-    def declared(self) -> tuple["Dataset", ...]:
-        """The datasets it declares itself (not those it only names)."""
-        return tuple(d for d in self.datasets if not isinstance(d, str))
-
 
 # -- the RSS and Atom reader every agency's feed shares (Feed.parse left out) -------------------------
 
