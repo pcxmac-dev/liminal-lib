@@ -72,15 +72,6 @@ def is_refusal(error: BaseException | str, status: int | None = None) -> bool:
     return False
 
 
-def killed(store, feed: str, kind: str, now: datetime | None = None) -> dict | None:
-    """The kill in force on a feed's live stream or fetching: {until, why, at, strikes}, or None."""
-    k = store.kv_json(key(feed, kind), {})
-    try:
-        return k if datetime.fromisoformat(k["until"]) > _now(now) else None
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
 def sharing(feed: str) -> list[str]:
     """The other feeds on the account a feed's requests count against: one key, one set of limits
     (Blue Ocean's are Alpaca's, Tiingo forex's Tiingo's: Provider.account)."""
@@ -100,65 +91,106 @@ def retry_after_s(error: BaseException | None) -> float | None:
     return None
 
 
+class KillSwitch:
+    """The kill policy on a store (the module's docstring): the kills kept in its database (kv
+    `kill:<feed>:<kind>`), so every process honours them. `killed` is the kill in force on a feed's
+    live stream or fetching; `strike` kills it (the ladder of KILL_MINUTES, never shorter than the
+    server's Retry-After; a policy kill of fetching reaches the feeds on the same account); `release`
+    lifts a feed's kills (the user's call); `kills` lists those in force. What a refusal looks like
+    (is_refusal), the wait a server asked for (retry_after_s) and who shares an account (sharing)
+    stay the module's functions, called through it."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def killed(self, feed: str, kind: str, now: datetime | None = None) -> dict | None:
+        """The kill in force on a feed's live stream or fetching: {until, why, at, strikes}, or None."""
+        k = self.store.kv_json(key(feed, kind), {})
+        try:
+            return k if datetime.fromisoformat(k["until"]) > _now(now) else None
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def strike(self, feed: str, kind: str, why: str, now: datetime | None = None, minutes: float | None = None,
+               log=None, at_least_s: float | None = None, shared: bool = True) -> dict:
+        """Kill a feed's live stream or fetching: for the next step of KILL_MINUTES (or `minutes`, a
+        kill by hand, which replaces any kill in force), and never shorter than the wait the server
+        asked for (`at_least_s`, its Retry-After: an hour asked for was struck as half an hour, and
+        asked again before the hour was up). Returns the kill. A strike while already killed is the
+        same kill: it does not climb the ladder, and is neither logged nor recorded again. A policy kill
+        of fetching reaches the feeds on the same account too (`sharing`): Alpaca's 429 is Blue Ocean's,
+        which went on sending into it; a kill by hand stays on the feed named."""
+        store = self.store
+        now = _now(now)
+        fresh = [True]
+
+        def climb(k: dict) -> dict:
+            try:
+                if minutes is None and datetime.fromisoformat(k["until"]) > now:
+                    fresh[0] = False
+                    return {**k, "why": why[:300]}  # already off: the same kill, the latest reason
+                recent = now - datetime.fromisoformat(k["at"]) < timedelta(hours=STRIKE_MEMORY_H)
+            except (KeyError, TypeError, ValueError):
+                recent = False
+            strikes = (k.get("strikes", 0) if recent else 0) + 1
+            length = minutes if minutes is not None else KILL_MINUTES[min(strikes, len(KILL_MINUTES)) - 1]
+            if minutes is None and at_least_s:
+                length = max(length, at_least_s / 60)
+            return {"at": now.isoformat(timespec="seconds"), "until": (now + timedelta(minutes=length)).isoformat(timespec="seconds"),
+                    "why": why[:300], "strikes": strikes, "by": "user" if minutes is not None else "policy"}
+
+        k = store.kv_update(key(feed, kind), climb, {})
+        if fresh[0]:
+            store.feed_event(feed, kind, "killed", detail=f"until {k['until']} (strike {k['strikes']}): {why}", now=now)
+            if log:
+                log(f"KILLED {feed} {kind} until {k['until'][:16].replace('T', ' ')} UTC (strike {k['strikes']}): {why}")
+        if shared and kind == "fetch" and minutes is None:
+            for other in sharing(feed):
+                self.strike(other, kind, f"the same account as {feed}: {why}", now, log=log, at_least_s=at_least_s,
+                            shared=False)
+        return k
+
+    def release(self, feed: str, kinds=KINDS) -> list[str]:
+        """Lift the kills on a feed (the user's call: it also forgets its strikes). Returns those lifted."""
+        store = self.store
+        lifted = []
+        for kind in kinds:
+            if store.kv_json(key(feed, kind)):
+                store.kv_set(key(feed, kind), "")
+                store.feed_event(feed, kind, "released", detail="by the user")
+                lifted.append(kind)
+        return lifted
+
+    def kills(self, feeds, now: datetime | None = None) -> list[dict]:
+        """The kills in force: [{feed, kind, until, why, strikes, by}]."""
+        out = []
+        for feed in feeds:
+            for kind in KINDS:
+                k = self.killed(feed, kind, now)
+                if k:
+                    out.append({"feed": feed, "kind": kind, **k})
+        return out
+
+
+def killed(store, feed: str, kind: str, now: datetime | None = None) -> dict | None:
+    """The kill in force on a feed's live stream or fetching: KillSwitch(store).killed(...)."""
+    return KillSwitch(store).killed(feed, kind, now)
+
+
 def strike(store, feed: str, kind: str, why: str, now: datetime | None = None, minutes: float | None = None,
            log=None, at_least_s: float | None = None, shared: bool = True) -> dict:
-    """Kill a feed's live stream or fetching: for the next step of KILL_MINUTES (or `minutes`, a
-    kill by hand, which replaces any kill in force), and never shorter than the wait the server
-    asked for (`at_least_s`, its Retry-After: an hour asked for was struck as half an hour, and
-    asked again before the hour was up). Returns the kill. A strike while already killed is the
-    same kill: it does not climb the ladder, and is neither logged nor recorded again. A policy kill
-    of fetching reaches the feeds on the same account too (`sharing`): Alpaca's 429 is Blue Ocean's,
-    which went on sending into it; a kill by hand stays on the feed named."""
-    now = _now(now)
-    fresh = [True]
-
-    def climb(k: dict) -> dict:
-        try:
-            if minutes is None and datetime.fromisoformat(k["until"]) > now:
-                fresh[0] = False
-                return {**k, "why": why[:300]}  # already off: the same kill, the latest reason
-            recent = now - datetime.fromisoformat(k["at"]) < timedelta(hours=STRIKE_MEMORY_H)
-        except (KeyError, TypeError, ValueError):
-            recent = False
-        strikes = (k.get("strikes", 0) if recent else 0) + 1
-        length = minutes if minutes is not None else KILL_MINUTES[min(strikes, len(KILL_MINUTES)) - 1]
-        if minutes is None and at_least_s:
-            length = max(length, at_least_s / 60)
-        return {"at": now.isoformat(timespec="seconds"), "until": (now + timedelta(minutes=length)).isoformat(timespec="seconds"),
-                "why": why[:300], "strikes": strikes, "by": "user" if minutes is not None else "policy"}
-
-    k = store.kv_update(key(feed, kind), climb, {})
-    if fresh[0]:
-        store.feed_event(feed, kind, "killed", detail=f"until {k['until']} (strike {k['strikes']}): {why}", now=now)
-        if log:
-            log(f"KILLED {feed} {kind} until {k['until'][:16].replace('T', ' ')} UTC (strike {k['strikes']}): {why}")
-    if shared and kind == "fetch" and minutes is None:
-        for other in sharing(feed):
-            strike(store, other, kind, f"the same account as {feed}: {why}", now, log=log, at_least_s=at_least_s,
-                   shared=False)
-    return k
+    """Kill a feed's live stream or fetching: KillSwitch(store).strike(...) (its docstring). Returns the kill."""
+    return KillSwitch(store).strike(feed, kind, why, now, minutes, log, at_least_s, shared)
 
 
 def release(store, feed: str, kinds=KINDS) -> list[str]:
-    """Lift the kills on a feed (the user's call: it also forgets its strikes). Returns those lifted."""
-    lifted = []
-    for kind in kinds:
-        if store.kv_json(key(feed, kind)):
-            store.kv_set(key(feed, kind), "")
-            store.feed_event(feed, kind, "released", detail="by the user")
-            lifted.append(kind)
-    return lifted
+    """Lift the kills on a feed: KillSwitch(store).release(...). Returns those lifted."""
+    return KillSwitch(store).release(feed, kinds)
 
 
 def kills(store, feeds, now: datetime | None = None) -> list[dict]:
-    """The kills in force: [{feed, kind, until, why, strikes, by}]."""
-    out = []
-    for feed in feeds:
-        for kind in KINDS:
-            k = killed(store, feed, kind, now)
-            if k:
-                out.append({"feed": feed, "kind": kind, **k})
-    return out
+    """The kills in force: KillSwitch(store).kills(...)."""
+    return KillSwitch(store).kills(feeds, now)
 
 
 class Flapping:

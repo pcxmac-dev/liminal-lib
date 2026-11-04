@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.5.0 (2026-11-03)
+
+The library's core classes (Phase 5 of the object-oriented rewrite; the user: the plugins and apps
+"follow inheritance/oop paradigm"). The rule: a class owns a run's or a view's state and the
+decisions; the hot loops and the pure functions stay functions; every module keeps a function under
+each name a caller or a test used, so nothing that imports the library changes (the charts app and
+the integrator move to the classes in their own commits); a class calls the module's functions
+through the module (a test's stand-in is the one used) and reads the module's constants when a
+stage runs, never when it is made.
+
+- The runs (5a). `collector.Collector(source, store, tier, *, now, log, refresh_hours, feeds, audits,
+  futures_per_run, proxies)`: a feed's scheduled run, stage by stage (`_before_symbols`, `_plan_run`,
+  `_step(item, urgent)`, `_after_symbols`; `run(only, published_only, on_item, directory_allowance) ->
+  SyncResult`); `sync(...)` is `Collector(...).run(...)`, its source the class's (inspect.getsource; the
+  signature its own). `RunQueue` (the run's rows on the fetch queue; `_Queue` kept); `SYMBOLS_PER_MONTH`
+  a mapping that reads the plugins' monthly caps when asked, not when the module loads, so
+  `monthly_cap` is lazy. `audit.Auditor(source, store, me, feeds, now, log, rng)` (`run`, `span`,
+  `random_span`, `window`; its watch rows read once). `initializer.Initializer(store, feeds,
+  futures_feeds, source, now).run(exchanges, by, dry_run)`. Stay functions: sync_bars, _fill, _plan,
+  verify_fetched, sync_future, check_listing, daily_first, market_days, refresh_directory,
+  fill_directory_icons, scan, history_floor; audit.compare, box, spot, allowance, audit_span.
+- The planning (5b). `coverage.Planner(store, feeds, now).plan(me, ticker, asset, timespan, floor,
+  listed_from, exchange)`: the audit scores and the standing scheme read once when first needed, a
+  ticker's watch rows and a feed's quality the first time they are asked for (`forget(ticker)` reads
+  the rows again), the coverage ledger for every plan; the collector makes one planner per symbol
+  step, per daily-first sweep and per scan. `sourcing.Scheme.build`, `Scheme.standing` (the cache the
+  class's, by store), `Scheme.reports`, `Scheme.offered` (the field `offers` is the offers a scheme
+  was built from) and `scheme.text(reports)`; `sourcing.Scans` (`keep`, `last`, `read`, `at`,
+  `plans`, `apply`): the providers' capability scans (kv SCAN_KEY) in one place. `derive.Builder(store,
+  log)` (`chain`, `symbol`, `run`) and `derive.Lease(store, source, ticker)`, a context manager over
+  the build leases; `baddata.Scanner(store, log)` (`symbol`, `repair_from_ticks`, `entries`). Stay
+  functions: frontier_ms, subtract, intersect, eras_ahead, has_open_time, latency, rank, same_market;
+  derive.aggregate (vectorised), the marks and leases; malformed, spikes, inconsistent, scan_series.
+- The settings and the services (5c). `config.Settings.load(env, env_file)` and
+  `settings.with_detected(plans)`; `config.UserEnvironment(registry, names)` (`saved`, `save`): the
+  user's saved environment variables, the winreg code (a stand-in registry works on any OS).
+  `datasets.DatasetFetcher(store, today, session, log)` (`fetch`, `files`, `git`) and `FileQueue`
+  (`_FileQueue` kept). `publications.Reader.for_view`, `Reader.view`, `Reader.run_due`,
+  `Reader.recheck_now`. `killswitch.KillSwitch(store)` (`killed`, `strike`, `release`, `kills`).
+  `runner.Runner(store_factory, settings, log)` (`run`, `plugin`). `live.Recorder.for_settings(settings,
+  locks, stop, log)`: the charts app's `make_recorder`. `host.Attachment.to(name, db_path, start, wait,
+  log)` and `host.Host.start(name, db_path)` (a host's wait for its first client is `start_wait` now);
+  `attach`, `start_host` and `attach_or_start` kept (the integrator imports them by name).
+- Stays functional, deliberately: `sessions.py` (the calendar masks), `freshness.expected` and the
+  publication rules, `storage/*` (the queries), `stores.py`, `memory.py`, `resources.py`, `proc.py`,
+  `ratelimit.py` (classes already), `gov.view`, `gov.parameters`, `gov.upcoming`.
+- Tests: tests/test_run_classes.py, tests/test_planning_classes.py, tests/test_settings_classes.py (each
+  class's state across calls, the wrappers, a stand-in set on the module used by the class, a constant
+  read when the run runs). With another checkout of the library installed editable, the suite needs
+  this checkout's `src` first on PYTHONPATH.
+
 ## 1.4.2 (2026-11-03)
 
 The recorder's command pattern (`live.RECORDER_COMMAND`: a stray recorder ended by the one holding the

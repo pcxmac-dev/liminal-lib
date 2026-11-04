@@ -297,6 +297,20 @@ class Recorder:
 
             self.connect = lambda url: WebSocket(url, timeout=RECV_TIMEOUT)
 
+    @classmethod
+    def for_settings(cls, settings, locks: list, stop: threading.Event | None = None, log=None) -> "Recorder":
+        """The recorder of the settings' database (the charts app's make_recorder until 1.5.0): the
+        coins and the stock keys its settings allow (stock_keys), a poller of the night where a plugin
+        has one (night_poller: Tiingo's Blue Ocean nights), the publishers read with the settings in a
+        thread of its own, holding `locks` (take_locks), stopping on `stop` (a host's) or its own,
+        logging to the database's log (logs.log_to) unless `log` is given."""
+        from .logs import log_to
+
+        extra = {"stop": stop} if stop is not None else {}
+        return cls(settings.db_path, coins=settings.live_coins, stock_keys=stock_keys(settings), locks=locks,
+                   log=log or log_to(settings.db_path), selected_only=settings.live_selected_only,
+                   boats=night_poller(settings), publications=settings, **extra)
+
     # -- streams ---------------------------------------------------------------------------
     def _follow(self, stream, ws) -> bool:
         """Bring a stream's symbols in line with those wanted (once the server took the keys).
