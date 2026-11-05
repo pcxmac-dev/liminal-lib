@@ -90,6 +90,10 @@ class PublisherPlugin(IntegratorPlugin):
     # it. API 1.4: each a Dataset (sources/dataset.py), declared here, its files only from its hosts and
     # stopped by its pause; a name (API 1.2) lists one another plugin declares
     datasets: tuple["Dataset | str", ...] = ()
+    # 2.1: its document class (sources/data.py: a DocumentData subclass), where its documents differ
+    # from its kind's default (document_data): what a document and its parts (paragraphs, pages,
+    # statements) are, the assessment of what it published, their integrity. None: the default.
+    data: "type | None" = None
 
     # -- the hooks, each the contract's default here -----------------------------------------------
 
@@ -134,6 +138,15 @@ class PublisherPlugin(IntegratorPlugin):
     def declared(self) -> tuple["Dataset", ...]:
         """The datasets it declares itself (not those it only names)."""
         return tuple(d for d in self.datasets if not isinstance(d, str))
+
+    def document_data(self):
+        """Its document class as an instance for this publisher (2.1; sources/data.py): the one it
+        declares (`data`), else the contract's for its kind (a vendor's HeadlineData, every other's
+        ReleaseData)."""
+        from .data import default_document  # when asked, not on import
+
+        cls = self.data or default_document(self.kind)
+        return cls(publisher=self.name)
 
 
 @dataclass(frozen=True)
