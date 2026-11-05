@@ -10,7 +10,6 @@ part-way loses nothing and the stored data always stays contiguous.
 """
 from __future__ import annotations
 
-import inspect
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -1829,12 +1828,6 @@ def sync(
                      futures_per_run=futures_per_run, proxies=proxies).run(
         only=only, published_only=published_only, on_item=on_item, directory_allowance=directory_allowance)
 
-
-# The run's source is the Collector's: inspect.getsource(sync) reads the class (the charts app's
-# tests/test_market_days.py reads from it the order the stages take: the market days before the
-# market moves). The signature stays sync's own.
-sync.__signature__ = inspect.signature(sync)
-sync.__wrapped__ = Collector
 
 CALENDAR_REFRESH_DAYS = 7
 NEWS_REFRESH_MINUTES = 30  # a vendor's headlines (its publisher plugin, publications.py): this often

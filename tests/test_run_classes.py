@@ -101,12 +101,12 @@ def test_the_stage_before_the_symbols_calls_the_module_in_order(store, monkeypat
     c.only = {"AAA"}  # a run for chosen symbols spends nothing on the rest
     c._before_symbols()
     assert calls == []
-    # the contract the charts app's tests read from the run's source: the stages' order, in the class
-    body = inspect.getsource(sync)
+    # the contract the charts app's tests read from the first stage's source: the stages' order
+    body = inspect.getsource(Collector._before_symbols)
     assert body.index("market_days(source, store, me, feeds, store.watchlist(source.name), now, proxies or [], log)") \
         < body.index("fetch_market_moves(source, store, now, proxies or [], log)")
     assert 'if source.serves("stock") and gives_days(source, me):' in body
-    assert sync.__wrapped__ is Collector and list(inspect.signature(sync).parameters)[:4] == ["source", "store", "tier", "now"]
+    assert list(inspect.signature(sync).parameters)[:4] == ["source", "store", "tier", "now"]  # the wrapper's own
 
 
 def test_the_runs_constants_and_clock_are_read_when_it_runs(store, monkeypatch, no_requests_before_the_symbols):

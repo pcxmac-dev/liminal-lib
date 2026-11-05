@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1 (2026-11-04)
+
+`collector.sync` is a plain wrapper of `Collector(...).run(...)` again: the charts app's test reads the
+run's first stage (`Collector._before_symbols`) since the app moved to the classes, so the copied
+signature and `sync.__wrapped__` go.
+
 ## 1.5.0 (2026-11-03)
 
 The library's core classes (Phase 5 of the object-oriented rewrite; the user: the plugins and apps
