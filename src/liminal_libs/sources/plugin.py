@@ -434,7 +434,11 @@ class FeedPlugin(IntegratorPlugin):
         cls = self.data.get(asset) or default_series(asset)
         if cls is None:
             raise ValueError(f"{self.name}: no data class for {asset!r}")
-        return cls(feed=self.name)
+        out = cls(feed=self.name)
+        own = self.hours.get(asset) if isinstance(self.hours, Mapping) else None
+        if own and out.calendar in ("", asset):  # a market with hours of its own (Blue Ocean's nights): its calendar
+            out.calendar = own
+        return out
 
     def resolutions_for(self, tier: "Tier", asset: str) -> tuple[str, ...]:
         """The resolutions its plan (`tier`) provides for an asset class (none it does not serve)."""

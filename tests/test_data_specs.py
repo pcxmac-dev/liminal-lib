@@ -376,6 +376,11 @@ def test_the_contract_gives_a_default_data_class_and_a_plugin_declares_its_own()
     stock = acme.data_for("stock")
     assert type(stock) is StockSymbolData and stock.feed == "acme" and acme.data == {} and acme.api == "2.0"  # the default stays 2.0
     assert type(acme.data_for("crypto")) is CryptoSymbolData and acme.data_for("crypto").spec().kind == "crypto"
+    # a feed with hours of its own (Acme's stocks keep Blue Ocean's nights: `hours`): its data on that calendar
+    assert stock.calendar == "overnight" and stock.spec().calendar == "overnight" and acme.data_for("crypto").calendar == "crypto"
+    assert len(stock.slots("minute", at(0, 0), at(0, 0, d=date(2026, 10, 21)))) == 480  # 00:00-04:00 and 20:00-24:00
+    assert stock.integrity([bar(at(23, 0))]).ok and StockSymbolData().integrity([bar(at(23, 0))]).where("out_of_session") == (at(23, 0),)
+    assert type(stock).calendar == "stock"  # the class is untouched: the instance keeps the feed's hours
     with pytest.raises(ValueError, match="no data class for 'bonds'"):
         acme.data_for("bonds")
     record = acme_record()
