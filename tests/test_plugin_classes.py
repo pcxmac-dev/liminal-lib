@@ -200,9 +200,9 @@ def test_with_makes_a_changed_copy_of_a_class_instance_or_a_record():
 
 
 def test_the_contract_version_of_a_class_and_of_a_record():
-    assert PLUGIN_API == "2.0" and RECORD_API == "1.12"
-    assert api_refusal("2.0") is None and api_refusal("2") is None
-    assert "needs a newer app" in api_refusal("2.1") and "needs a newer app" in api_refusal("3.0")
+    assert PLUGIN_API == "2.1" and RECORD_API == "1.12"  # 2.1: the data specs; a 2.0 plugin loads unchanged
+    assert api_refusal("2.0") is None and api_refusal("2") is None and api_refusal("2.1") is None
+    assert "needs a newer app" in api_refusal("2.2") and "needs a newer app" in api_refusal("3.0")
     assert "needs a release for 2.x" in api_refusal("1.12")
     for api in ("1.0", "1", "1.12"):
         assert api_refusal(api, record=True) is None
@@ -229,7 +229,8 @@ def test_the_registry_takes_an_instance_a_class_or_a_module_of_either(installed)
     assert list(found) == ["acme", "acmerec"] and list(registry.publishers()) == ["acme-news"]
     assert type(found["acme"]) is AcmeFeed and found["acme"].origin == "package: pack:PLUGIN"
     why = dict(registry.errors())
-    assert why["early (fake_0:PLUGIN)"] == "early: written for plugin API 1.12; this app offers 2.0: it needs a release for 2.x"
+    assert why["early (fake_0:PLUGIN)"] == (f"early: written for plugin API 1.12; this app offers {PLUGIN_API}: it needs a "
+                                            "release for 2.x")
     assert why["late (fake_1:PLUGIN)"].startswith("late: written for plugin API 2.0 as a record")
     assert "defines no PLUGIN (" in why["empty (empty:PLUGIN)"]
 

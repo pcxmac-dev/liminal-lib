@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.6.0 (2026-11-04)
+
+The data specs, plugin API 2.1 (`sources/data.py`; the user, 2026-11-03: "every plugin needs to furnish
+the correct mechanisms for assessing data, data integrity, provide a 'spec' for the data, different
+source plugins like massive and Tingo can inherit 'stock_symbol_data'. obviously the api for each
+source provider is different so the calls are inherent (external calls to source) of the plugin
+itself"). A class per kind of data a plugin delivers, three methods each: `spec()` (the fields and
+dtypes of a bar or tick row, the resolutions, the sessions and calendar, the adjustments, the symbol
+form; a document's parts; the products and the store each goes to), `assess(frame, since, until)`
+(what is held and what is missing, as the coverage ledger's spans; completeness against the calendar's
+slots; latency; with a plan, freshness's state: what the coverage planner and the integrator's
+assessor read) and `integrity(frame)` (the bad-data rules behind one method, `baddata.malformed` and
+`baddata.spikes` called, not copied; duplicates, rows outside the sessions, gaps inside them, a
+required field missing; `compare` for two feeds' copies of a span, `audit.compare`; `scan` for the
+rules that need the store, `baddata.scan_series`). The fetching stays in each plugin's DataSource.
+
+- `TimeSeriesData`, the feeds' bars and ticks: `StockSymbolData` (the user's stock_symbol_data: the
+  consolidated tape's hours, split-adjusted prices, TICKER or TICKER.SUFFIX), `IndexData` (regular
+  hours, no volume), `FxData` (Sunday 17:00 to Friday 17:00 ET, day bars UTC days), `CryptoSymbolData`
+  (around the clock, UTC days, a market per exchange so two copies' volumes are not judged, trades
+  without sale conditions) and `FutureData` (CME sessions, settlement dates, no adjustment at a roll);
+  `slots` (the bar starts the calendar expects), `rows` and `wire` (a frame in either shape, the feeds'
+  or the store's). A feed plugin declares its own where the vendor's data differs
+  (`FeedPlugin.data = {"stock": MassiveStockData}`, a subclass of the asset class's) and the contract
+  gives the asset class's otherwise (`FeedPlugin.data_for(asset)`), so every plugin conforms unchanged.
+- `DocumentData`, the publishers' documents, with the parts `Paragraph`, `Page` and `Statement` and
+  `Document` (the original as the stores hold it, with its pages and the statements parsed from it):
+  `ReleaseData` (an agency's items, GOV_ITEMS), `HeadlineData` (a vendor's headlines, NEWS) and
+  `FilingData` (a filing's pages and statements: the `FILINGS` kind, to be registered in
+  storage/documents.KINDS when filings are fetched); a document's completeness is its required
+  fields, every page in its run and every statement parsed through; a publisher declares its class
+  (`PublisherPlugin.data`) or takes its kind's (`PublisherPlugin.document_data()`: a vendor's
+  headlines, every other's releases).
+- Storage, in the classes (the user: "mongo is used to store the original source document, while a
+  different database is used to evaluate or derive information from the original document"): each
+  class's `products` (`Product`: the Store picker's type, the engines, where) name the original (a
+  document to MongoDB, or SQLite until it moves; a feed's bars to its file, its closed months to
+  DuckDB, its ticks) and what is evaluated or derived from it (parsed statements, the AI evaluations,
+  the bars built here, the pruned list), kept apart in SQLite or DuckDB, keyed to the original
+  (`keyed_to`) and never written back; `check()` holds a class to it. Nothing moves today.
+- The contract: `registry.PLUGIN_API` 2.1; a 2.0 plugin loads unchanged (`api_refusal`); a plugin
+  declaring `data` says `api = "2.1"`; `Plugin.api`'s default stays 2.0. The conformance check reads
+  the declarations: a feed's `data` maps its asset classes to subclasses of theirs, a publisher's is
+  a DocumentData subclass or None, each class a plugin answers with gives its spec and passes its own
+  `check()`, a declaration needs 2.1 or later.
+- Tests: tests/test_data_specs.py (each class's spec and slots, an assessment with known gaps and
+  latency, an integrity report on malformed, duplicate, out-of-session and spiky rows, a document's
+  parts and completeness, the contract's defaults and a plugin's own, the conformance rule, a 2.0
+  plugin loading under 2.1). The charts app pins the contract's version in two tests of its own
+  (tests/test_plugins.py: `PLUGIN_API == "2.0"`, and a plugin for 2.1 expected to be left out): they
+  move with the app's pin of the library.
+
 ## 1.5.1 (2026-11-04)
 
 `collector.sync` is a plain wrapper of `Collector(...).run(...)` again: the charts app's test reads the

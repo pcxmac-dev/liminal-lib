@@ -1,4 +1,4 @@
-"""The class contract's conformance check (plugin API 2.0): what a plugin must satisfy, by kind, read
+"""The class contract's conformance check (plugin API 2.0, the data declarations of 2.1): what a plugin must satisfy, by kind, read
 from the plugin object alone (no settings, no network, nothing sent). The user, 2026-11-03: "evaluate
 each functional piece of software or plugin and verify correctness and valid functionality through
 unit tests created to address new class scheme". `problems(plugin)` lists what is wrong;
@@ -205,6 +205,7 @@ def _feed(tag: str, p: FeedPlugin) -> list[str]:
         out.append(f"{tag}: hours must map assets to a calendar kind")
     if not p.gives("build"):
         out.append(f"{tag}: a feed must give build()")
+    out += _data(tag, p, "feed", assets)
     return out
 
 
@@ -233,6 +234,58 @@ def _publisher(tag: str, p: PublisherPlugin) -> list[str]:
     for prop in ("has_moments", "has_calendar", "reads_itself"):
         if not isinstance(getattr(p, prop), bool):
             out.append(f"{tag}: {prop} is not a bool")
+    out += _data(tag, p, "publisher", frozenset())
+    return out
+
+
+def _data(tag: str, p: Plugin, kind: str, assets: frozenset) -> list[str]:
+    """Its data classes (2.1; sources/data.py): a feed's `data` maps its asset classes to
+    TimeSeriesData subclasses of those classes, a publisher's `data` is a DocumentData subclass or
+    None; each class the plugin answers with (data_for, document_data) gives its spec and passes its
+    own check; a plugin declaring any is written for 2.1 or later."""
+    from .data import DocumentData, TimeSeriesData  # when asked, not on import: the specs read the calendars
+    from .registry import api_version
+
+    out: list[str] = []
+    data = p.data
+    if kind == "feed":
+        if not isinstance(data, Mapping):
+            return [f"{tag}: data must map an asset class to a TimeSeriesData subclass"]
+        refused = set()  # the asset classes whose declared class is wrong: data_for is not asked for them
+        for asset, cls in data.items():
+            if asset not in assets:
+                out.append(f"{tag}: data {asset!r}, not one of its assets")
+            if not (isinstance(cls, type) and issubclass(cls, TimeSeriesData)):
+                out.append(f"{tag}: data[{asset!r}] must be a TimeSeriesData subclass")
+                refused.add(asset)
+            elif cls.asset != asset:
+                out.append(f"{tag}: data[{asset!r}] is {cls.__name__}, {cls.asset or 'no asset class'}'s data")
+                refused.add(asset)
+        for asset in sorted(assets - refused):
+            try:
+                d = p.data_for(asset)
+                d.spec()
+                out += [f"{tag}: data_for({asset!r}): {w}" for w in d.check()]
+            except Exception as e:  # noqa: BLE001 - what it raised is the problem
+                out.append(f"{tag}: data_for({asset!r}) failed: {type(e).__name__}: {e}")
+        declared = bool(data)
+    else:
+        declared = data is not None
+        if data is not None and not (isinstance(data, type) and issubclass(data, DocumentData)):
+            out.append(f"{tag}: data must be a DocumentData subclass or None")
+        else:
+            try:
+                d = p.document_data()
+                d.spec()
+                out += [f"{tag}: document_data(): {w}" for w in d.check()]
+            except Exception as e:  # noqa: BLE001 - what it raised is the problem
+                out.append(f"{tag}: document_data() failed: {type(e).__name__}: {e}")
+    if declared:
+        try:
+            if api_version(p.api) < (2, 1):
+                out.append(f"{tag}: declares data (plugin API 2.1) but is written for {p.api}")
+        except ValueError:
+            pass  # said already: not a contract version
     return out
 
 

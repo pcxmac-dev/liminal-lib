@@ -115,7 +115,13 @@ ENTRY_POINTS = "liminal.providers"
 #   class attributes, what it does methods overriding the contract's defaults; FeedPlugin.delays and
 #   hours (freshness.Delays). The record form (Provider, Publisher: the hooks as callback fields) is
 #   plugin API 1.x still, every minor up to RECORD_API, loaded as before.
-PLUGIN_API = "2.0"
+# 2.1 (2026-11-04): the data specs (sources/data.py): a feed's data classes (FeedPlugin.data, data_for:
+#   TimeSeriesData's StockSymbolData, IndexData, FxData, CryptoSymbolData and FutureData, a vendor's
+#   subclass where its data differs) and a publisher's document class (PublisherPlugin.data,
+#   document_data: DocumentData's ReleaseData, HeadlineData and FilingData, with Paragraph, Page and
+#   Statement), each with spec(), assess(frame, since, until) and integrity(frame); the contract's
+#   defaults where a plugin declares none, so a 2.0 plugin loads unchanged.
+PLUGIN_API = "2.1"
 RECORD_API = "1.12"  # the record form's contract: what a Provider or a Publisher may declare
 
 

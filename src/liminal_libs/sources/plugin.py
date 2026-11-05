@@ -20,6 +20,14 @@ The record form (plugin API 1.x: `Provider`, a frozen dataclass with the hooks a
 way of both: a hook is answered by a record's callback field when set, by a class's method
 otherwise, and by the contract's default where neither is given (`gives` says which).
 
+Plugin API 2.1 adds the data specs (sources/data.py): what each kind of data a plugin delivers is,
+how complete and fresh a frame of it is, whether its rows are sound. A feed declares its data classes
+(`FeedPlugin.data`: an asset class -> a TimeSeriesData subclass, a vendor's where its data differs
+from the asset class's: Massive's SIP tape) and the contract gives the asset class's otherwise
+(`data_for`); a publisher declares its document class (`PublisherPlugin.data`, a DocumentData
+subclass) or takes the one for its kind (`document_data`). The fetching stays in each plugin's
+DataSource; the specs describe and judge what it fetches.
+
 A plugin instance is shared by every thread of a process: it holds what it declares, never a run's
 state. This module imports no registry and no collector: the contract knows nothing of who loads it.
 """
@@ -322,6 +330,11 @@ class FeedPlugin(IntegratorPlugin):
     # calendar it keeps: Blue Ocean's "overnight"); declared into freshness.DELAYS when it loads
     delays: "Mapping[str, Mapping[str, Delay]]" = NOTHING
     hours: Mapping[str, str] = NOTHING
+    # 2.1: its data classes (sources/data.py), an asset class -> a TimeSeriesData subclass, where its
+    # data differs from the asset class's (Massive's SIP tape and its ticks, Tiingo's split-adjusted
+    # days, Alpaca's IEX stream): the spec of a row, the assessment of a frame, its integrity; the
+    # contract's default for the asset class otherwise (data_for). A plugin declaring one says api "2.1".
+    data: "Mapping[str, type]" = NOTHING
 
     # -- the hooks, each the contract's default here -----------------------------------------------
 
@@ -411,6 +424,21 @@ class FeedPlugin(IntegratorPlugin):
 
     def kind_for(self, asset: str) -> str:
         return self.kind_by_asset.get(asset) or self.kind
+
+    def data_for(self, asset: str):
+        """Its data class for an asset class, as an instance for this feed (2.1; sources/data.py): the
+        one it declares (`data`), else the contract's for the asset class (StockSymbolData, IndexData,
+        FxData, CryptoSymbolData, FutureData). ValueError for an asset class the library has not."""
+        from .data import default_series  # when asked, not on import: the specs read the calendars
+
+        cls = self.data.get(asset) or default_series(asset)
+        if cls is None:
+            raise ValueError(f"{self.name}: no data class for {asset!r}")
+        out = cls(feed=self.name)
+        own = self.hours.get(asset) if isinstance(self.hours, Mapping) else None
+        if own and out.calendar in ("", asset):  # a market with hours of its own (Blue Ocean's nights): its calendar
+            out.calendar = own
+        return out
 
     def resolutions_for(self, tier: "Tier", asset: str) -> tuple[str, ...]:
         """The resolutions its plan (`tier`) provides for an asset class (none it does not serve)."""

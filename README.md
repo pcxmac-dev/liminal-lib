@@ -10,7 +10,8 @@ repositories fit together; the naming: apps `liminal-<app>`, this library `limin
   assistants, on the contract here (`sources/plugin.py`: the classes; `sources/registry.py`: the registry).
 
 What is here (`src/liminal_libs`): the stores (`storage/`: SQLite, DuckDB and MongoDB by data type), the plugin
-contract and the registry (`sources/`), the collector (`collector.py`: the finest data each plan allows, as far
+contract and the registry (`sources/`), the data specs (`sources/data.py`: what each kind of data a plugin delivers
+is, how complete and fresh a frame of it is, whether its rows are sound), the collector (`collector.py`: the finest data each plan allows, as far
 back as it allows, within its limits), the delivery scheme by cost and capability (`sourcing.py`), the calendars
 and publication delays (`freshness.py`, `sessions.py`), the resident hosts over local pipes (`host.py`), the live
 recorder (`live.py`), the composites, derived frames and provenance, the datasets, the publishers, and the settings
