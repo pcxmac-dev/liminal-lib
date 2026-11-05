@@ -190,6 +190,114 @@ class Reader:
         self._queued: set[str] = set()  # feeds put on the fetch queue by this reader
         self._queue_broken = False
 
+    # -- a reader for a view, a pass over the due feeds, a recheck ---------------------------------------
+    @classmethod
+    def for_view(cls, gdb: gov.GovDB, settings=None, store=None) -> "Reader":
+        """A reader for the views: it reads the publishers' state and sends nothing (no session to
+        send with, nothing logged)."""
+        return cls(gdb, settings, store, session=_NoSession(), log=lambda *_: None)
+
+    @classmethod
+    def view(cls, gdb: gov.GovDB, settings=None, store=None, now: datetime | None = None,
+             publishers: dict[str, Publisher] | None = None) -> list[dict]:
+        """Each publisher for the Plugins view: its state, its feeds (state, last read, next read), its
+        scrape checks and limits as verified, its requests today, its schedule. Reads, never asks. A
+        publisher whose plugin fails here is shown with the error, the others as they are."""
+        from .sources import publishers as registered
+
+        now = now or datetime.now(timezone.utc)
+        pubs = publishers if publishers is not None else registered()
+        reader = cls.for_view(gdb, settings, store)
+        out = []
+        for pub in pubs.values():
+            try:
+                out.append(_publisher_view(reader, gdb, pub, now))
+            except Exception as e:  # noqa: BLE001 - one plugin's fault never takes the view down
+                out.append({"name": pub.name, "title": pub.title, "about": pub.about, "kind": pub.kind, "origin": pub.origin,
+                            "version": pub.version, "api": pub.api,
+                            "account": pub.account, "state": "off", "error": f"{type(e).__name__}: {e}", "kill": None,
+                            "held": None, "policy": {"hosts": list(pub.policy.hosts), "minMinutes": pub.policy.min_minutes,
+                                                     "perDay": pub.policy.per_day, "contact": pub.policy.contact,
+                                                     "contactSet": bool(reader.contact), "terms": pub.policy.terms,
+                                                     "termsUrl": pub.policy.terms_url, "blocked": list(BLOCKED_HOSTS)},
+                            "floorMinutes": pub.policy.min_minutes, "requestsToday": 0, "feeds": [], "robots": [],
+                            "recheck": None, "calendar": [], "moments": [], "partOf": pub.part_of,
+                            "datasets": list(pub.dataset_names), "parts": []})
+        by = {p["name"]: p for p in out}
+        from .sources import providers
+        from .sources.registry import plugin_of
+
+        for p in out:
+            if p["partOf"] == p["name"] or p["partOf"] not in by:
+                # part of a feed plugin (Massive's headlines: in Massive), or of none here: one of its own
+                p["partOf"] = plugin_of(p["partOf"]) if p["partOf"] != p["name"] and p["partOf"] in providers() else ""
+        for p in out:  # a plugin of several publishers (Federal): its parts, their requests, its state from theirs
+            parts = [q for q in out if q["partOf"] == p["name"] and q is not p]
+            if not parts:
+                continue
+            p["parts"] = [q["name"] for q in parts]
+            p["requestsToday"] += sum(q["requestsToday"] for q in parts)
+            states = {q["state"] for q in parts}
+            if p["state"] not in ("paused", "refused", "off"):
+                p["state"] = ("failing" if states & {"failing", "refused"} else "ready" if "ready" in states
+                              else "waiting" if "waiting" in states else "off" if states <= {"off"} else p["state"])
+        return out
+
+    @classmethod
+    def run_due(cls, settings, log: Callable[[str], None], force: bool = False, now: datetime | None = None) -> float | None:
+        """One pass over the publishers' due feeds (the hourly sync's when no recorder runs, and the
+        `gov` command), under the machine's lock. Returns the seconds to the next due feed, None when
+        another reader holds the lock or the copy is offline."""
+        from . import proc
+        from .storage import Store
+
+        if getattr(settings, "offline", False):
+            return None
+        lock = lock_path(settings.db_path)
+        if not proc.acquire(lock):
+            return None
+        gdb = gov.open_db(settings.db_path)
+        try:
+            with Store(settings.db_path) as store:
+                return cls(gdb, settings, store, log=log).step(now or datetime.now(timezone.utc), force=force)
+        finally:
+            gdb.close()
+            proc.release(lock)
+
+    @classmethod
+    def recheck_now(cls, settings, name: str, log: Callable[[str], None], wait_s: float = 30.0) -> dict | None:
+        """A publisher's limits verified now (the Plugins view's Recheck): waits up to `wait_s` for the
+        machine's lock. Pressed again within RECHECK_AGAIN_MINUTES of the last, nothing is sent (the
+        findings kept are returned). Returns its findings, or None (unknown, not set up here, or the
+        lock busy)."""
+        from . import proc
+        from .sources import publishers as registered
+        from .storage import Store
+
+        pub = registered().get(name)
+        if pub is None or getattr(settings, "offline", False):
+            return None
+        lock, until = lock_path(settings.db_path), time.monotonic() + wait_s
+        while not proc.acquire(lock):
+            if time.monotonic() > until:
+                return None
+            time.sleep(0.5)
+        gdb = gov.open_db(settings.db_path)
+        try:
+            with Store(settings.db_path) as store:
+                reader, now = cls(gdb, settings, store, log=log), datetime.now(timezone.utc)
+                if not reader.set_up(pub):
+                    return None
+                last = gdb.recheck_get(pub.name)
+                if last and now - datetime.fromisoformat(last["at"]) < timedelta(minutes=RECHECK_AGAIN_MINUTES):
+                    log(f"publications: {pub.title}: verified {(now - datetime.fromisoformat(last['at'])).seconds // 60} min ago: "
+                        "nothing sent again")
+                    return last
+                return reader.recheck(pub, now)
+        finally:
+            gdb.close()
+            proc.release(lock)
+
     # -- the fetch queue (storage/queue.py: the Fetcher shows it) -----------------------------------------
     QUEUE_STATE = {"ok": "done", "unchanged": "done", "waiting": "held", "refused": "held", "failed": "failed"}
 
@@ -736,48 +844,8 @@ def _calendar(pub: Publisher, now: datetime) -> list[dict]:
 
 def view(gdb: gov.GovDB, settings=None, store=None, now: datetime | None = None,
          publishers: dict[str, Publisher] | None = None) -> list[dict]:
-    """Each publisher for the Plugins view: its state, its feeds (state, last read, next read), its
-    scrape checks and limits as verified, its requests today, its schedule. Reads, never asks. A
-    publisher whose plugin fails here is shown with the error, the others as they are."""
-    from .sources import publishers as registered
-
-    now = now or datetime.now(timezone.utc)
-    pubs = publishers if publishers is not None else registered()
-    reader = Reader(gdb, settings, store, session=_NoSession(), log=lambda *_: None)
-    out = []
-    for pub in pubs.values():
-        try:
-            out.append(_publisher_view(reader, gdb, pub, now))
-        except Exception as e:  # noqa: BLE001 - one plugin's fault never takes the view down
-            out.append({"name": pub.name, "title": pub.title, "about": pub.about, "kind": pub.kind, "origin": pub.origin,
-                        "version": pub.version, "api": pub.api,
-                        "account": pub.account, "state": "off", "error": f"{type(e).__name__}: {e}", "kill": None,
-                        "held": None, "policy": {"hosts": list(pub.policy.hosts), "minMinutes": pub.policy.min_minutes,
-                                                 "perDay": pub.policy.per_day, "contact": pub.policy.contact,
-                                                 "contactSet": bool(reader.contact), "terms": pub.policy.terms,
-                                                 "termsUrl": pub.policy.terms_url, "blocked": list(BLOCKED_HOSTS)},
-                        "floorMinutes": pub.policy.min_minutes, "requestsToday": 0, "feeds": [], "robots": [],
-                        "recheck": None, "calendar": [], "moments": [], "partOf": pub.part_of,
-                        "datasets": list(pub.dataset_names), "parts": []})
-    by = {p["name"]: p for p in out}
-    from .sources import providers
-    from .sources.registry import plugin_of
-
-    for p in out:
-        if p["partOf"] == p["name"] or p["partOf"] not in by:
-            # part of a feed plugin (Massive's headlines: in Massive), or of none here: one of its own
-            p["partOf"] = plugin_of(p["partOf"]) if p["partOf"] != p["name"] and p["partOf"] in providers() else ""
-    for p in out:  # a plugin of several publishers (Federal): its parts, their requests, its state from theirs
-        parts = [q for q in out if q["partOf"] == p["name"] and q is not p]
-        if not parts:
-            continue
-        p["parts"] = [q["name"] for q in parts]
-        p["requestsToday"] += sum(q["requestsToday"] for q in parts)
-        states = {q["state"] for q in parts}
-        if p["state"] not in ("paused", "refused", "off"):
-            p["state"] = ("failing" if states & {"failing", "refused"} else "ready" if "ready" in states
-                          else "waiting" if "waiting" in states else "off" if states <= {"off"} else p["state"])
-    return out
+    """Each publisher for the Plugins view: Reader.view(...) (its docstring). Reads, never asks."""
+    return Reader.view(gdb, settings, store, now, publishers)
 
 
 def _publisher_view(reader: Reader, gdb: gov.GovDB, pub: Publisher, now: datetime) -> dict:
@@ -839,58 +907,15 @@ def lock_path(main_db: Path | str) -> Path:
 
 
 def run_due(settings, log: Callable[[str], None], force: bool = False, now: datetime | None = None) -> float | None:
-    """One pass over the publishers' due feeds (the hourly sync's when no recorder runs, and the
-    `gov` command), under the machine's lock. Returns the seconds to the next due feed, None when
-    another reader holds the lock or the copy is offline."""
-    from . import proc
-    from .storage import Store
-
-    if getattr(settings, "offline", False):
-        return None
-    lock = lock_path(settings.db_path)
-    if not proc.acquire(lock):
-        return None
-    gdb = gov.open_db(settings.db_path)
-    try:
-        with Store(settings.db_path) as store:
-            return Reader(gdb, settings, store, log=log).step(now or datetime.now(timezone.utc), force=force)
-    finally:
-        gdb.close()
-        proc.release(lock)
+    """One pass over the publishers' due feeds under the machine's lock: Reader.run_due(...). Returns
+    the seconds to the next due feed, None when another reader holds the lock or the copy is offline."""
+    return Reader.run_due(settings, log, force, now)
 
 
 def recheck_now(settings, name: str, log: Callable[[str], None], wait_s: float = 30.0) -> dict | None:
-    """A publisher's limits verified now (the Plugins view's Recheck): waits up to `wait_s` for the
-    machine's lock. Pressed again within RECHECK_AGAIN_MINUTES of the last, nothing is sent (the
-    findings kept are returned). Returns its findings, or None (unknown, not set up here, or the
-    lock busy)."""
-    from . import proc
-    from .sources import publishers as registered
-    from .storage import Store
-
-    pub = registered().get(name)
-    if pub is None or getattr(settings, "offline", False):
-        return None
-    lock, until = lock_path(settings.db_path), time.monotonic() + wait_s
-    while not proc.acquire(lock):
-        if time.monotonic() > until:
-            return None
-        time.sleep(0.5)
-    gdb = gov.open_db(settings.db_path)
-    try:
-        with Store(settings.db_path) as store:
-            reader, now = Reader(gdb, settings, store, log=log), datetime.now(timezone.utc)
-            if not reader.set_up(pub):
-                return None
-            last = gdb.recheck_get(pub.name)
-            if last and now - datetime.fromisoformat(last["at"]) < timedelta(minutes=RECHECK_AGAIN_MINUTES):
-                log(f"publications: {pub.title}: verified {(now - datetime.fromisoformat(last['at'])).seconds // 60} min ago: "
-                    "nothing sent again")
-                return last
-            return reader.recheck(pub, now)
-    finally:
-        gdb.close()
-        proc.release(lock)
+    """A publisher's limits verified now (the Plugins view's Recheck): Reader.recheck_now(...). Returns
+    its findings, or None."""
+    return Reader.recheck_now(settings, name, log, wait_s)
 
 
 def pause(store, name: str, on: bool) -> dict | None:

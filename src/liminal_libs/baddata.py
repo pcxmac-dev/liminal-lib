@@ -277,80 +277,106 @@ def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "st
         derive.mark_dirty(store, source, ticker, timespan, min(a for a, _ in dirty), max(b for _, b in dirty))
     return added
 
+class Scanner:
+    """The bad-data scans of a store (the module's docstring): the store and the log. `symbol` judges
+    what changed in a series since its last scan (each base frame the feed holds, from where it
+    changed, with the neighbours around it); `repair_from_ticks` rebuilds a feed's bars built from
+    its ticks with the condition rules as they are now, keeping what changes on the pruned list;
+    `entries` reads a symbol's pruned list. The rules and the scan of one series stay the module's
+    functions (malformed, spikes, inconsistent, scan_series: numpy), called through it."""
+
+    def __init__(self, store, log=print):
+        self.store, self.log = store, log
+
+    def symbol(self, source: str, ticker: str, asset: str = "stock", exchange: str | None = None) -> int:
+        """Judge what changed in a series since its last scan (each base frame it holds). Returns entries added."""
+        store = self.store
+        added = 0
+        for timespan in BASES:
+            key = SCAN_KEY.format(source, ticker.upper(), timespan)
+            started = int(time.time() * 1000)
+            done = int(store.kv_get(key) or -1)
+            if done < 0:
+                span = store.bar_edges(source, ticker, timespan)
+                if span is None:
+                    continue
+                lo, hi = span[0], span[1] + STEP_MS[timespan]
+            else:
+                span = store.changed_span(source, ticker, timespan, done)
+                if span is None:
+                    continue
+                lo, hi = span[0], span[1] + STEP_MS[timespan]
+            # the bars just before the change are judged again: their right-hand neighbours came with it
+            added += scan_series(store, source, ticker, timespan, asset, lo - MARGIN_MS[timespan], hi, exchange=exchange)
+            store.kv_set(key, str(started - SLACK_MS))
+        return added
+
+    def repair_from_ticks(self, source: str, tickers=None) -> dict:
+        """Rebuild every bar built from a feed's stored ticks with the condition rules as they are now,
+        then the frames above them; each bar the rebuild changes or removes is kept on the pruned list
+        (rule "rebuilt"), with what replaced it. The ticks are read, never changed. Returns
+        {ticker: entries added}."""
+        from . import derive
+        from .collector import build_from_ticks
+        from .storage import TicksBlocked
+
+        store, log = self.store, self.log
+        if not store.ticks_allowed:
+            raise TicksBlocked("bars-only mode: the ticks are not read here (BARS_ONLY=off to rebuild from them)")
+        rows = store.conn.execute("SELECT product, span_lo, span_hi FROM derivations WHERE kind='bars-from-ticks' "
+                                  "AND product LIKE ?", (f"{source}:%",)).fetchall()
+        days: dict[str, set] = {}
+        for product, lo, hi in rows:
+            ticker = product.split(":", 1)[1]
+            if lo is not None and hi is not None and (not tickers or ticker in {t.upper() for t in tickers}):
+                days.setdefault(ticker, set()).add((int(lo), int(hi)))
+        rules = store.condition_rules(source)
+        why = (f"rebuilt from the stored ticks with {source}'s own condition rules: its numeric condition ids had taken "
+               "the rules of tape letters with the same digits (2, Average Price Trade, set highs and lows)")
+        out = {}
+        for n, ticker in enumerate(sorted(days)):
+            spans = sorted(days[ticker])
+            added = 0
+            for lo, hi in spans:
+                before = store.built_rows(source, ticker, lo, hi, [("second", 1), ("minute", 1)])
+                build_from_ticks(store, source, ticker, lo, hi, rules, log)
+                after = store.built_rows(source, ticker, lo, hi, [("second", 1), ("minute", 1)])
+                added += store.prune_replaced(source, ticker, before, after, why)
+            lo, hi = spans[0][0] - 400 * 86_400_000, spans[-1][1] + 400 * 86_400_000
+            above = [frame for _, frames in derive.CHAINS for frame in frames]
+            before = store.built_rows(source, ticker, lo, hi, above)
+            derive.build_symbol(store, source, ticker, derive.asset_of(store, source, ticker), log=log)
+            after = store.built_rows(source, ticker, lo, hi, above)
+            added += store.prune_replaced(source, ticker, before, after, why + "; built again from the rebuilt bars")
+            out[ticker] = added
+            log(f"repair {source}:{ticker} ({n + 1}/{len(days)}): {len(spans)} days rebuilt, {added:,} bars kept on the "
+                "pruned list")
+        return out
+
+    def entries(self, ticker: str, source: str | None = None, limit: int = 200) -> list[dict]:
+        """A symbol's pruned list for the chart app and the command line, newest first."""
+        df = self.store.pruned(source, ticker, limit=limit)
+        out = []
+        for r in df.itertuples():
+            out.append({"source": r.source, "timespan": r.timespan, "multiplier": int(r.multiplier), "ts": int(r.ts),
+                        "open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": r.volume,
+                        "rule": r.rule, "excludes": bool(r.excludes), "evidence": json.loads(r.evidence or "{}"),
+                        "prunedAt": int(r.pruned_at), "code": r.code,
+                        "releasedAt": None if pd.isna(r.released_at) else int(r.released_at)})
+        return out
+
 
 def scan_symbol(store, source: str, ticker: str, asset: str = "stock", exchange: str | None = None) -> int:
-    """Judge what changed in a series since its last scan (each base frame it holds). Returns entries added."""
-    added = 0
-    for timespan in BASES:
-        key = SCAN_KEY.format(source, ticker.upper(), timespan)
-        started = int(time.time() * 1000)
-        done = int(store.kv_get(key) or -1)
-        if done < 0:
-            span = store.bar_edges(source, ticker, timespan)
-            if span is None:
-                continue
-            lo, hi = span[0], span[1] + STEP_MS[timespan]
-        else:
-            span = store.changed_span(source, ticker, timespan, done)
-            if span is None:
-                continue
-            lo, hi = span[0], span[1] + STEP_MS[timespan]
-        # the bars just before the change are judged again: their right-hand neighbours came with it
-        added += scan_series(store, source, ticker, timespan, asset, lo - MARGIN_MS[timespan], hi, exchange=exchange)
-        store.kv_set(key, str(started - SLACK_MS))
-    return added
+    """Judge what changed in a series since its last scan: Scanner(store).symbol(...). Returns entries added."""
+    return Scanner(store).symbol(source, ticker, asset, exchange)
 
 
 def repair_from_ticks(store, source: str, tickers=None, log=print) -> dict:
-    """Rebuild every bar built from a feed's stored ticks with the condition rules as they are now,
-    then the frames above them; each bar the rebuild changes or removes is kept on the pruned list
-    (rule "rebuilt"), with what replaced it. The ticks are read, never changed. Returns
-    {ticker: entries added}."""
-    from . import derive
-    from .collector import build_from_ticks
-    from .storage import TicksBlocked
-
-    if not store.ticks_allowed:
-        raise TicksBlocked("bars-only mode: the ticks are not read here (BARS_ONLY=off to rebuild from them)")
-    rows = store.conn.execute("SELECT product, span_lo, span_hi FROM derivations WHERE kind='bars-from-ticks' "
-                              "AND product LIKE ?", (f"{source}:%",)).fetchall()
-    days: dict[str, set] = {}
-    for product, lo, hi in rows:
-        ticker = product.split(":", 1)[1]
-        if lo is not None and hi is not None and (not tickers or ticker in {t.upper() for t in tickers}):
-            days.setdefault(ticker, set()).add((int(lo), int(hi)))
-    rules = store.condition_rules(source)
-    why = (f"rebuilt from the stored ticks with {source}'s own condition rules: its numeric condition ids had taken "
-           "the rules of tape letters with the same digits (2, Average Price Trade, set highs and lows)")
-    out = {}
-    for n, ticker in enumerate(sorted(days)):
-        spans = sorted(days[ticker])
-        added = 0
-        for lo, hi in spans:
-            before = store.built_rows(source, ticker, lo, hi, [("second", 1), ("minute", 1)])
-            build_from_ticks(store, source, ticker, lo, hi, rules, log)
-            after = store.built_rows(source, ticker, lo, hi, [("second", 1), ("minute", 1)])
-            added += store.prune_replaced(source, ticker, before, after, why)
-        lo, hi = spans[0][0] - 400 * 86_400_000, spans[-1][1] + 400 * 86_400_000
-        above = [frame for _, frames in derive.CHAINS for frame in frames]
-        before = store.built_rows(source, ticker, lo, hi, above)
-        derive.build_symbol(store, source, ticker, derive.asset_of(store, source, ticker), log=log)
-        after = store.built_rows(source, ticker, lo, hi, above)
-        added += store.prune_replaced(source, ticker, before, after, why + "; built again from the rebuilt bars")
-        out[ticker] = added
-        log(f"repair {source}:{ticker} ({n + 1}/{len(days)}): {len(spans)} days rebuilt, {added:,} bars kept on the "
-            "pruned list")
-    return out
+    """Rebuild every bar built from a feed's stored ticks with the rules as they are now:
+    Scanner(store, log).repair_from_ticks(...). Returns {ticker: entries added}."""
+    return Scanner(store, log).repair_from_ticks(source, tickers)
 
 
 def entries(store, ticker: str, source: str | None = None, limit: int = 200) -> list[dict]:
-    """A symbol's pruned list for the chart app and the command line, newest first."""
-    df = store.pruned(source, ticker, limit=limit)
-    out = []
-    for r in df.itertuples():
-        out.append({"source": r.source, "timespan": r.timespan, "multiplier": int(r.multiplier), "ts": int(r.ts),
-                    "open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": r.volume,
-                    "rule": r.rule, "excludes": bool(r.excludes), "evidence": json.loads(r.evidence or "{}"),
-                    "prunedAt": int(r.pruned_at), "code": r.code,
-                    "releasedAt": None if pd.isna(r.released_at) else int(r.released_at)})
-    return out
+    """A symbol's pruned list for the chart app and the command line, newest first: Scanner(store).entries(...)."""
+    return Scanner(store).entries(ticker, source, limit)

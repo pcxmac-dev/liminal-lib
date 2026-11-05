@@ -181,6 +181,84 @@ class Settings:
         when it has none, or these were made directly (no variables read)."""
         return (self.origin or self).plugins.get(name)
 
+    @classmethod
+    def load(cls, env: Mapping[str, str] | None = None, env_file: Path | None = Path(".env")) -> "Settings":
+        """The settings read: the `.env` file (`env_file`; None for none), then the user's saved
+        variables (saved_user_keys: a process started before a key was saved still sees it), then the
+        process's environment, which wins (or `env` in its place: nothing saved is read then); the
+        app's settings under their old names too (RENAMED). Every plugin's own settings are built from
+        the same variables (Settings.plugin); a plugin whose settings fail is left out and reported,
+        a value of yours it refuses (ConfigError) stops the app."""
+        merged: MutableMapping[str, str] = {}
+        if env_file is not None:
+            merged.update(read_env_file(env_file))
+        if env is None:
+            merged.update(saved_user_keys())  # the process's own environment still wins
+        merged.update(os.environ if env is None else env)
+        for name in RENAMED:  # the app's settings under their old names
+            if name not in merged and (old := renamed(merged, name)) is not None:
+                merged[name] = old
+        from .sources.registry import assistants, leave_out, providers, publishers  # when called, not on import: the registry imports the plugins
+
+        plugins = {}  # the plugins' own settings (API 1.11; 2.0: every kind's), by plugin
+        for name, p in [*providers().items(), *publishers().items(), *assistants().items()]:
+            if not p.has_settings:
+                continue
+            try:
+                plugins[name] = p.settings_of(merged)
+            except ConfigError:
+                raise  # a value of yours it refuses: stops the app, as any setting's does
+            except Exception as e:  # noqa: BLE001 - the plugin's own failure: left out and reported, never fatal
+                leave_out(name, f"its settings failed ({type(e).__name__}: {e})")
+
+        refresh = _float_setting(merged, "LIMINAL_REFRESH_HOURS")  # hours, fractions too (0.5)
+        from .sources.registry import variables
+
+        return cls(
+            db_path=Path(merged["LIMINAL_DB"]).expanduser() if merged.get("LIMINAL_DB") else DEFAULT_DB_PATH,
+            refresh_hours=float(refresh or 0),
+            source_priority=tuple(
+                s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive,alpaca").split(",") if s.strip()
+            ),
+            plugins=plugins,
+            audits_per_run=_default(_int_setting(merged, "AUDITS_PER_RUN"), 2),
+            audits_random_per_run=_default(_int_setting(merged, "AUDITS_RANDOM_PER_RUN"), 1),
+            tick_history_days=_default(_int_setting(merged, "TICK_HISTORY_DAYS"), 365),
+            second_history_days=_default(_int_setting(merged, "SECOND_HISTORY_DAYS"), 365),
+            backups_keep=_default(_int_setting(merged, "BACKUPS_KEEP"), 7),
+            tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
+            gov_contact=(merged.get("GOV_CONTACT") or "").strip() or None,
+            crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
+            live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
+            live_stocks=str(merged.get("LIVE_STOCKS", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
+            live_selected_only=_live_streams(merged.get("LIVE_STREAMS")),
+            offline=any(str(merged.get(n, "")).strip().lower() in ("1", "true", "yes", "on")
+                        for n in ("LIMINAL_OFFLINE", "LIMINAL_READONLY")),
+            read_only=str(merged.get("LIMINAL_READONLY", "")).strip().lower() in ("1", "true", "yes", "on"),
+            bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
+            chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
+            futures_per_run=_default(_int_setting(merged, "FUTURES_PER_RUN"), 100),
+            assistant=(merged.get("LIMINAL_ASSISTANT") or "").strip().lower() or None,
+            env={n: merged[n] for n in variables() if merged.get(n)},
+            variables=dict(merged),
+        )
+
+    def with_detected(self, plans: Mapping[str, str]) -> "Settings":
+        """These settings with the plan variables the provider plugins' scans found (registry.Scanned),
+        each where the user set none: the user's own setting always wins. Settings made directly (no
+        `variables`) are kept as they are. A plan value no plugin knows is not applied."""
+        if self.variables is None:
+            return self
+        base = self.variables
+        new = {k: str(v) for k, v in plans.items() if v and not base.get(k)}
+        if new == dict(self.detected):
+            return self
+        try:
+            out = load_settings(env={**base, **new}, env_file=None)
+        except ConfigError:
+            return self  # a value its settings refuse: the plan stays as the user's settings have it
+        return replace(out, variables=base, detected=new)
+
 
 def read_env_file(path: Path) -> dict[str, str]:
     """Parse a simple KEY=VALUE .env file. Blank lines and # comments are ignored, also one after
@@ -216,52 +294,92 @@ def saved_names() -> tuple[str, ...]:
     return variables()
 
 
-def saved_user_keys() -> dict[str, str]:
-    """The API keys and plan names among the user's saved environment variables (the Windows
-    registry's user Environment key): a process started before they were saved still sees them."""
-    if os.name != "nt":
-        return {}
-    try:
+class UserEnvironment:
+    """The user's saved environment variables: the Windows registry's user Environment key, where
+    tools/set-key.ps1 saves the keys and plans (never a file this software writes). `saved` reads the
+    variables every plugin declares (saved_names: its keys, plans and options), so a process started
+    before one was saved still sees it; `save` writes one (None removes it) there and in this
+    process's environment, so processes started from now on read it, and this one at once (its own
+    environment wins over the saved variables in Settings.load). `registry`: winreg, or a stand-in
+    (the tests'; on another OS, the only way); `names`: the variables read (every plugin's by default).
+    Without Windows and without a stand-in nothing is saved and `save` refuses (ConfigError)."""
+
+    def __init__(self, registry=None, names=None):
+        self.registry = registry
+        self._names = names
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """The variables read from the user's saved ones."""
+        return saved_names() if self._names is None else tuple(self._names)
+
+    @property
+    def real(self) -> bool:
+        """Whether this is Windows' own registry (then Windows is told of a change)."""
+        return self.registry is None
+
+    def _winreg(self):
+        if self.registry is not None:
+            return self.registry
+        if os.name != "nt":
+            return None
         import winreg
 
-        out = {}
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            for name in saved_names():
+        return winreg
+
+    def saved(self) -> dict[str, str]:
+        """The API keys and plan names among the user's saved environment variables ({} where there
+        are none to read: another OS without a stand-in, or the key unreadable)."""
+        registry = self._winreg()
+        if registry is None:
+            return {}
+        try:
+            out = {}
+            with registry.OpenKey(registry.HKEY_CURRENT_USER, "Environment") as key:
+                for name in self.names:
+                    try:
+                        value, _ = registry.QueryValueEx(key, name)
+                    except FileNotFoundError:
+                        continue
+                    if value:
+                        out[name] = str(value)
+            return out
+        except OSError:
+            return {}
+
+    def save(self, name: str, value: str | None) -> None:
+        """Save one of the user's environment variables (None: remove it) where tools/set-key.ps1
+        saves them, and in this process's environment."""
+        registry = self._winreg()
+        if registry is None:
+            raise ConfigError("saving a setting needs Windows' user environment variables: set it in .env")
+        with registry.OpenKey(registry.HKEY_CURRENT_USER, "Environment", 0, registry.KEY_SET_VALUE) as key:
+            if value is None:
                 try:
-                    value, _ = winreg.QueryValueEx(key, name)
+                    registry.DeleteValue(key, name)
                 except FileNotFoundError:
-                    continue
-                if value:
-                    out[name] = str(value)
-        return out
-    except OSError:
-        return {}
+                    pass
+            else:
+                registry.SetValueEx(key, name, 0, registry.REG_SZ, value)
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+        if self.real:
+            _announce_environment()
+
+
+def saved_user_keys() -> dict[str, str]:
+    """The API keys and plan names among the user's saved environment variables (the Windows
+    registry's user Environment key): UserEnvironment().saved()."""
+    return UserEnvironment().saved()
 
 
 def save_user_variable(name: str, value: str | None, registry=None) -> None:
     """Save one of the user's environment variables (None: remove it) where tools/set-key.ps1 saves
-    them, the Windows registry's user Environment key, and in this process's environment: processes
-    started from now on read it, and this one at once (its own environment wins over the saved
-    variables in load_settings). `registry`: winreg, or a stand-in in tests. Windows only."""
-    real = registry is None
-    if real:
-        if os.name != "nt":
-            raise ConfigError("saving a setting needs Windows' user environment variables: set it in .env")
-        import winreg as registry
-    with registry.OpenKey(registry.HKEY_CURRENT_USER, "Environment", 0, registry.KEY_SET_VALUE) as key:
-        if value is None:
-            try:
-                registry.DeleteValue(key, name)
-            except FileNotFoundError:
-                pass
-        else:
-            registry.SetValueEx(key, name, 0, registry.REG_SZ, value)
-    if value is None:
-        os.environ.pop(name, None)
-    else:
-        os.environ[name] = value
-    if real:
-        _announce_environment()
+    them, and in this process's environment: UserEnvironment(registry).save(name, value). `registry`:
+    winreg, or a stand-in in tests. Windows only."""
+    UserEnvironment(registry).save(name, value)
 
 
 def _announce_environment() -> None:
@@ -281,76 +399,15 @@ def load_settings(
     env: Mapping[str, str] | None = None,
     env_file: Path | None = Path(".env"),
 ) -> Settings:
-    merged: MutableMapping[str, str] = {}
-    if env_file is not None:
-        merged.update(read_env_file(env_file))
-    if env is None:
-        merged.update(saved_user_keys())  # the process's own environment still wins
-    merged.update(os.environ if env is None else env)
-    for name in RENAMED:  # the app's settings under their old names
-        if name not in merged and (old := renamed(merged, name)) is not None:
-            merged[name] = old
-    from .sources.registry import assistants, leave_out, providers, publishers  # when called, not on import: the registry imports the plugins
-
-    plugins = {}  # the plugins' own settings (API 1.11; 2.0: every kind's), by plugin
-    for name, p in [*providers().items(), *publishers().items(), *assistants().items()]:
-        if not p.has_settings:
-            continue
-        try:
-            plugins[name] = p.settings_of(merged)
-        except ConfigError:
-            raise  # a value of yours it refuses: stops the app, as any setting's does
-        except Exception as e:  # noqa: BLE001 - the plugin's own failure: left out and reported, never fatal
-            leave_out(name, f"its settings failed ({type(e).__name__}: {e})")
-
-    refresh = _float_setting(merged, "LIMINAL_REFRESH_HOURS")  # hours, fractions too (0.5)
-    from .sources.registry import variables
-
-    return Settings(
-        db_path=Path(merged["LIMINAL_DB"]).expanduser() if merged.get("LIMINAL_DB") else DEFAULT_DB_PATH,
-        refresh_hours=float(refresh or 0),
-        source_priority=tuple(
-            s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive,alpaca").split(",") if s.strip()
-        ),
-        plugins=plugins,
-        audits_per_run=_default(_int_setting(merged, "AUDITS_PER_RUN"), 2),
-        audits_random_per_run=_default(_int_setting(merged, "AUDITS_RANDOM_PER_RUN"), 1),
-        tick_history_days=_default(_int_setting(merged, "TICK_HISTORY_DAYS"), 365),
-        second_history_days=_default(_int_setting(merged, "SECOND_HISTORY_DAYS"), 365),
-        backups_keep=_default(_int_setting(merged, "BACKUPS_KEEP"), 7),
-        tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
-        gov_contact=(merged.get("GOV_CONTACT") or "").strip() or None,
-        crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
-        live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
-        live_stocks=str(merged.get("LIVE_STOCKS", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
-        live_selected_only=_live_streams(merged.get("LIVE_STREAMS")),
-        offline=any(str(merged.get(n, "")).strip().lower() in ("1", "true", "yes", "on")
-                    for n in ("LIMINAL_OFFLINE", "LIMINAL_READONLY")),
-        read_only=str(merged.get("LIMINAL_READONLY", "")).strip().lower() in ("1", "true", "yes", "on"),
-        bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
-        chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
-        futures_per_run=_default(_int_setting(merged, "FUTURES_PER_RUN"), 100),
-        assistant=(merged.get("LIMINAL_ASSISTANT") or "").strip().lower() or None,
-        env={n: merged[n] for n in variables() if merged.get(n)},
-        variables=dict(merged),
-    )
+    """The settings read from the `.env` file, the user's saved variables and the process's
+    environment (or `env` in its place): Settings.load(env, env_file)."""
+    return Settings.load(env, env_file)
 
 
 def with_detected(settings: Settings, plans: Mapping[str, str]) -> Settings:
-    """The settings with the plan variables the provider plugins' scans found (registry.Scanned),
-    each where the user set none: the user's own setting always wins. Settings made directly (no
-    `variables`) are kept as they are. A plan value no plugin knows is not applied."""
-    if settings.variables is None:
-        return settings
-    base = settings.variables
-    new = {k: str(v) for k, v in plans.items() if v and not base.get(k)}
-    if new == dict(settings.detected):
-        return settings
-    try:
-        out = load_settings(env={**base, **new}, env_file=None)
-    except ConfigError:
-        return settings  # a value its settings refuse: the plan stays as the user's settings have it
-    return replace(out, variables=base, detected=new)
+    """The settings with the plan variables the provider plugins' scans found, each where the user
+    set none: settings.with_detected(plans)."""
+    return settings.with_detected(plans)
 
 
 def _live_coins(value: str | None) -> tuple[str, ...]:

@@ -167,62 +167,120 @@ def rank(profile: FeedProfile, resolution: str, scores: dict, quality: float = 1
     return (RES_RANK.get(resolution, 2), latency(profile.tier, asset) if asset else 0.0, -round(quality, 3),
             -(accuracy or 0.0), profile.priority, profile.name)
 
+class Planner:
+    """The planning of what a feed downloads (`plan`: one feed per span, the module's docstring),
+    decided for a store's series from what the feeds hold (the coverage ledger, read for every plan:
+    it changes as they fetch), who watches the series at what resolution, the audit scores, the
+    standing delivery scheme (sourcing.Scheme.standing) and each feed's quality. What a plan needs
+    besides the ledger is read once for the planner's life: the scores and the scheme when first
+    needed, a ticker's watch rows the first time it is planned (`forget` reads them again: its
+    listing checked, its resolution found), a feed's quality the first time it is ranked. A planner
+    lives for one symbol's step of a run, for a scan's or an activity view's pass. The pure functions
+    stay the module's (frontier_ms, subtract, intersect, eras_ahead, has_open_time, latency, rank,
+    same_market), called through it."""
+
+    def __init__(self, store, feeds: dict[str, FeedProfile], now: datetime):
+        self.store, self.feeds, self.now = store, feeds, now
+        self.today = now.astimezone(ET).date()
+        self._scores: dict | None = None
+        self._scheme = None
+        self._watch: dict[str, dict[tuple[str, str], dict]] = {}
+        self._quality: dict[tuple[str, str], float] = {}
+
+    @property
+    def scores(self) -> dict:
+        """The feeds' audit scores (Store.audit_scores), read once."""
+        if self._scores is None:
+            self._scores = self.store.audit_scores()
+        return self._scores
+
+    @property
+    def scheme(self):
+        """The standing delivery scheme (sourcing.standing), read once."""
+        if self._scheme is None:
+            from .sourcing import standing
+
+            self._scheme = standing(self.store, self.feeds, self.now)
+        return self._scheme
+
+    def watch(self, ticker: str) -> dict[tuple[str, str], dict]:
+        """A ticker's watch rows by (feed, ticker), read the first time it is asked for."""
+        key = ticker.upper()
+        if key not in self._watch:
+            self._watch[key] = {(w["source"], w["ticker"]): w for w in self.store.watchlist(ticker=ticker)}
+        return self._watch[key]
+
+    def forget(self, ticker: str) -> None:
+        """Read a ticker's watch rows again at its next plan (its listing checked, its resolution found)."""
+        self._watch.pop(ticker.upper(), None)
+
+    def quality(self, feed: str, asset: str) -> float:
+        """A feed's quality for an asset class (composite.quality_of), read once per feed and class."""
+        if (feed, asset) not in self._quality:
+            from .composite import quality_of
+
+            self._quality[(feed, asset)] = quality_of(self.store, feed, asset)
+        return self._quality[(feed, asset)]
+
+    def plan(self, me: FeedProfile, ticker: str, asset: str, timespan: str, floor: date,
+             listed_from: date | None = None, exchange: str | None = None) -> list[tuple[int, int]]:
+        """The spans `me` should download for a series now, oldest first (`exchange`: the MIC of a
+        listing outside the US, whose days are its own)."""
+        from .collector import history_floor
+
+        store, feeds, now, today = self.store, self.feeds, self.now, self.today
+        lo, hi = day_start_ms(floor), frontier_ms(freshness.hours(me.name, asset), me.tier, now, timespan, exchange)
+        gaps = [(lo, hi)] if lo < hi else []
+        # Held: what a feed of the same market sent. Bars built here from ticks do not count: the
+        # feed's own bars replace them when they arrive (received over derived).
+        held = [s for src, spans in store.coverage(ticker, timespan, received_only=True).items()
+                if same_market(feeds, src, me.name, asset) for s in spans]
+        nothing = store.coverage(ticker, timespan, include_none=True)  # feeds' spans incl. their empty ones
+        holds = store.coverage(ticker, timespan)
+        # what this feed already asked for and found empty is done for it (not for others)
+        held += subtract(nothing.get(me.name, []), holds.get(me.name, []))
+        gaps = subtract(gaps, held)
+
+        def empty(feed: str) -> list[tuple[int, int]]:
+            """Where a feed was asked and has nothing: a better-ranked feed does not stand in the way there."""
+            return subtract(nothing.get(feed, []), holds.get(feed, []))
+        watch = self.watch(ticker)
+        if gaps and timespan in ("minute", "second"):
+            # Bars are built here from ticks: where another feed holds ticks, the span is left to it. The
+            # tick feed itself still downloads its own bars there, which replace the ones built from its
+            # ticks. (Ticks are no longer fetched for history: a watch row still at 'trades' from before
+            # reserves no window of ticks to come.)
+            held_ticks = [s for src, spans in store.coverage(ticker, "trades").items()
+                          if src != me.name and same_market(feeds, src, me.name, asset) for s in spans]
+            gaps = subtract(gaps, held_ticks)
+        if gaps:
+            scores = self.scores
+            eras = self.scheme.order(asset, timespan, me.venues.get(asset))
+            mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores,
+                        self.quality(me.name, asset), asset)
+            for peer in feeds.values():
+                row = watch.get((peer.name, ticker.upper()))
+                if peer.name == me.name or row is None or asset not in peer.assets:
+                    continue
+                if not same_market(feeds, peer.name, me.name, asset):
+                    continue  # another market's data is not a copy of this feed's
+                ahead = eras_ahead(eras, peer.name, me.name)  # the delivery scheme (sourcing.py) decides
+                if ahead is None:  # where it does not know both: the rank does
+                    if rank(peer, row.get("resolution", "auto"), scores, self.quality(peer.name, asset), asset) >= mine:
+                        continue
+                    ahead = [(0, 2**62)]
+                p_floor = history_floor(peer.tier, today, asset)
+                if listed_from:
+                    p_floor = max(p_floor, listed_from)
+                edge = frontier_ms(freshness.hours(peer.name, asset), peer.tier, now, timespan, exchange)
+                window = intersect([(day_start_ms(p_floor), edge)], ahead)
+                gaps = subtract(gaps, subtract(window, empty(peer.name)))
+        step = STEP_MS.get(timespan, 60_000)
+        return [(a, b) for a, b in gaps if b - a >= step]
+
 
 def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str, timespan: str,
          floor: date, now: datetime, listed_from: date | None = None, exchange: str | None = None) -> list[tuple[int, int]]:
-    """The spans `me` should download for a series now, oldest first (`exchange`: the MIC of a
-    listing outside the US, whose days are its own)."""
-    from .collector import history_floor
-
-    today = now.astimezone(ET).date()
-    lo, hi = day_start_ms(floor), frontier_ms(freshness.hours(me.name, asset), me.tier, now, timespan, exchange)
-    gaps = [(lo, hi)] if lo < hi else []
-    # Held: what a feed of the same market sent. Bars built here from ticks do not count: the
-    # feed's own bars replace them when they arrive (received over derived).
-    held = [s for src, spans in store.coverage(ticker, timespan, received_only=True).items()
-            if same_market(feeds, src, me.name, asset) for s in spans]
-    nothing = store.coverage(ticker, timespan, include_none=True)  # feeds' spans incl. their empty ones
-    holds = store.coverage(ticker, timespan)
-    # what this feed already asked for and found empty is done for it (not for others)
-    held += subtract(nothing.get(me.name, []), holds.get(me.name, []))
-    gaps = subtract(gaps, held)
-
-    def empty(feed: str) -> list[tuple[int, int]]:
-        """Where a feed was asked and has nothing: a better-ranked feed does not stand in the way there."""
-        return subtract(nothing.get(feed, []), holds.get(feed, []))
-    watch = {(w["source"], w["ticker"]): w for w in store.watchlist(ticker=ticker)}
-    if gaps and timespan in ("minute", "second"):
-        # Bars are built here from ticks: where another feed holds ticks, the span is left to it. The
-        # tick feed itself still downloads its own bars there, which replace the ones built from its
-        # ticks. (Ticks are no longer fetched for history: a watch row still at 'trades' from before
-        # reserves no window of ticks to come.)
-        held_ticks = [s for src, spans in store.coverage(ticker, "trades").items()
-                      if src != me.name and same_market(feeds, src, me.name, asset) for s in spans]
-        gaps = subtract(gaps, held_ticks)
-    if gaps:
-        scores = store.audit_scores()
-        from .composite import quality_of
-        from .sourcing import standing
-
-        eras = standing(store, feeds, now).order(asset, timespan, me.venues.get(asset))
-        mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores,
-                    quality_of(store, me.name, asset), asset)
-        for peer in feeds.values():
-            row = watch.get((peer.name, ticker.upper()))
-            if peer.name == me.name or row is None or asset not in peer.assets:
-                continue
-            if not same_market(feeds, peer.name, me.name, asset):
-                continue  # another market's data is not a copy of this feed's
-            ahead = eras_ahead(eras, peer.name, me.name)  # the delivery scheme (sourcing.py) decides
-            if ahead is None:  # where it does not know both: the rank does
-                if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset), asset) >= mine:
-                    continue
-                ahead = [(0, 2**62)]
-            p_floor = history_floor(peer.tier, today, asset)
-            if listed_from:
-                p_floor = max(p_floor, listed_from)
-            edge = frontier_ms(freshness.hours(peer.name, asset), peer.tier, now, timespan, exchange)
-            window = intersect([(day_start_ms(p_floor), edge)], ahead)
-            gaps = subtract(gaps, subtract(window, empty(peer.name)))
-    step = STEP_MS.get(timespan, 60_000)
-    return [(a, b) for a, b in gaps if b - a >= step]
+    """The spans `me` should download for a series now, oldest first: Planner(store, feeds,
+    now).plan(...) (a planner for this one plan; a pass over many symbols makes one and keeps it)."""
+    return Planner(store, feeds, now).plan(me, ticker, asset, timespan, floor, listed_from, exchange)

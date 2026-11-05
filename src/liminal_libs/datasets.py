@@ -131,31 +131,166 @@ def due_files(store, ds: Dataset, today: date, force: bool = False) -> list[tupl
     return out
 
 
+class DatasetFetcher:
+    """A fetch of the research datasets (the module's docstring): the store, the day, the HTTP session
+    (made when first needed) and the log. `fetch` fetches or refreshes the datasets named (new file
+    versions and commits stored as versions, each under its publisher's checks and pause; with
+    `only_started`, only datasets fetched before: the scheduled sync never starts one by itself);
+    `files` fetches one dataset's due files, `git` one GitHub-hosted dataset's commits not imported
+    yet. What a fetch reads once: the datasets declared (declared) and which were started. The
+    parsing, the ledger, the kept copies and the git calls stay the module's functions, called
+    through it; each file's progress is on the fetch queue (FileQueue)."""
+
+    def __init__(self, store, today: date | None = None, session: requests.Session | None = None, log=print):
+        self.store, self.log = store, log
+        self.today = today or datetime.now(ET).date()
+        self._session = session
+
+    @property
+    def session(self) -> requests.Session:
+        """The HTTP session the files are downloaded with (requests's unless one was given)."""
+        if self._session is None:
+            self._session = requests.Session()
+        return self._session
+
+    def fetch(self, names: list[str] | None = None, force: bool = False, only_started: bool = False) -> dict:
+        """Fetch (or refresh) the datasets named (every one declared by default). Returns {name:
+        versions stored}."""
+        store, log = self.store, self.log
+        started = {n for n in declared() if store.dataset_files(n)}
+        upgrade_legacy(store, log)
+        relink_local_paths(store, log)
+        done = {}
+        known = declared()
+        for name in names or list(known):
+            ds = known[name]
+            if only_started and name not in started:
+                continue
+            why = stopped(store, ds)
+            if why:
+                log(f"{name}: not fetched ({why})")
+                continue
+            if ds.git and _repo(ds) is not None:
+                done[name] = self.git(ds, force)
+            else:
+                done[name] = self.files(ds, force)
+        return done
+
+    def files(self, ds: Dataset, force: bool = False) -> int:
+        """One dataset's due files (due_files) downloaded, each version kept and stored: a file
+        unchanged is noted, one not published yet or not readable is left for next time, a final one
+        is closed. Returns versions stored."""
+        store, today, session, log = self.store, self.today, self.session, self.log
+        name, n = ds.name, 0
+        single = len(ds.files(today)) == 1  # a file holding the whole dataset: what it drops is withdrawn
+        due = list(due_files(store, ds, today, force))
+        queue = FileQueue(store, ds, log)
+        queue.plan(due)
+        for url, final in due:
+            file = url.rsplit("/", 1)[-1]
+            why = refusal(ds, url)
+            if why:
+                log(f"{name}: {file} not fetched ({why})")
+                queue.end(url, "failed", error=f"not fetched ({why})")
+                continue
+            queue.start(url)
+            try:
+                resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=120)
+                if resp.status_code == 404 and not final:
+                    log(f"{name}: {file} not published yet")
+                    queue.end(url, "done", detail="not published yet", requests=1)
+                    continue
+                resp.raise_for_status()
+                parsed = ds.parse(url, resp.content)
+            except (requests.RequestException, ValueError, KeyError, zipfile.BadZipFile) as e:
+                log(f"{name}: {file} not fetched ({e}); tried again next time")  # the others go on
+                queue.end(url, "failed", error=str(e)[:300], requests=1)
+                continue
+            if not parsed.values and not parsed.constituents:
+                log(f"{name}: {file} had nothing to read (format changed?); not marked fetched")
+                queue.end(url, "failed", error="nothing to read (format changed?)", requests=1, bytes_=len(resp.content))
+                continue
+            blob = resp.content
+            sha = hashlib.sha256(blob).hexdigest()
+            prev = store.dataset_files(name).get(url)
+            if prev and prev["sha256"] == sha:
+                store.set_dataset_file(name, url, len(blob), prev["values"] or 0, closed=final, sha256=sha,
+                                       version_at=prev["version_at"], origin=sha, local_path=prev["local_path"])
+                log(f"{name}: {file} unchanged")
+                queue.end(url, "done", detail="unchanged", requests=1, bytes_=len(blob))
+                continue
+            version = _published_at(resp) or datetime.now(timezone.utc)
+            local = _keep(store, ds, file, blob, sha)
+            counts = store.save_dataset_version(ds.provider, name, parsed, _ms_dt(version), sha,
+                                                first_rule=ds.published if prev is None else None,
+                                                withdraw=single and prev is not None)
+            store.set_dataset_file(name, url, len(blob), _changed(counts), closed=final, sha256=sha, version_at=version,
+                                   origin=sha, local_path=_relative(store, local))
+            _quality_prior(store, ds)
+            log(f"{name}: {file} ({len(blob) / 1e6:.2f} MB, published {version:%Y-%m-%d}): {_describe(counts)}"
+                + ("; final, closed" if final else ""))
+            queue.end(url, "done", detail=_describe(counts), requests=1, bytes_=len(blob), rows=_changed(counts))
+            n += 1
+        return n
+
+    def git(self, ds: Dataset, force: bool = False, update: bool = True) -> int:
+        """Import every commit of a GitHub-hosted dataset's file not imported yet, oldest first, each a
+        published version at its commit time; then check the submodule out at the repository's newest
+        commit. Returns commits imported."""
+        store, today, log = self.store, self.today, self.log
+        repo, path = _repo(ds), ds.git[1]
+        files = store.dataset_files(ds.name)
+        git_files = {u: f for u, f in files.items() if u.startswith("git:")}
+        if git_files and not force and (today - max(f["fetched_at"] for f in git_files.values()).date()).days < ds.refresh_days:
+            return 0
+        why = refusal(ds, f"https://{GIT_HOST}/{ds.git[0]}") if update else None
+        if why:
+            log(f"{ds.name}: not updated from {GIT_HOST} ({why}); using the commits already here")
+        elif update:
+            try:
+                _git(repo, "fetch", "--quiet", "origin")
+            except GitError as e:
+                log(f"{ds.name}: could not update {ds.git[0]} ({e}); using the commits already here")
+        ref = _git_ref(repo)
+        commits = [line.split(" ", 1) for line in _git(repo, "log", "--reverse", "--format=%H %cI", ref, "--", path).splitlines()
+                   if line.strip()]
+        if not git_files and files:
+            store.clear_dataset_files(ds.name)  # the downloads' ledger gives way to the commit history
+        seen = {f["origin"] for f in git_files.values()}
+        n, totals = 0, dict(new=0, revised=0, withdrawn=0, unchanged=0, joined=0, changed=0, left=0)
+        for sha, when in commits:
+            if sha in seen:
+                continue
+            t = datetime.fromisoformat(when)
+            blob = _git(repo, "show", f"{sha}:{path}", binary=True)
+            try:
+                parsed = ds.parse(path, blob)
+            except (ValueError, KeyError, csv.Error) as e:
+                log(f"{ds.name}: commit {sha[:8]} not readable ({e}); skipped")
+                parsed = Parsed()
+            url = f"git:{ds.git[0]}@{sha}"
+            if not parsed.values and not parsed.constituents:
+                store.set_dataset_file(ds.name, url, len(blob), 0, closed=True, version_at=t, origin=sha,
+                                       local_path=f"{ds.git[0]}/{path}")
+                continue
+            counts = store.save_dataset_version(ds.provider, ds.name, parsed, _ms_dt(t), sha,
+                                                first_rule=ds.published if not seen and n == 0 else None, withdraw=True)
+            store.set_dataset_file(ds.name, url, len(blob), _changed(counts), closed=True, version_at=t, origin=sha,
+                                   local_path=f"{ds.git[0]}/{path}")
+            totals = {k: totals[k] + counts[k] for k in totals}
+            n += 1
+        if commits:
+            _git(repo, "checkout", "--quiet", "--detach", ref)  # the repository's newest commit: the file's latest version
+            _quality_prior(store, ds)
+        log(f"{ds.name}: {n} new commits of {ds.git[0]} ({len(commits)} in all)" + (f": {_describe(totals)}" if n else ""))
+        return n
+
+
 def fetch(store, names: list[str] | None = None, today: date | None = None, force: bool = False,
           session: requests.Session | None = None, log=print, only_started: bool = False) -> dict:
-    """Fetch (or refresh) datasets: new file versions or commits are stored as versions. With
-    `only_started`, only datasets fetched before (the scheduled sync never starts one by itself).
-    Returns {name: versions stored}."""
-    today = today or datetime.now(ET).date()
-    session = session or requests.Session()
-    started = {n for n in declared() if store.dataset_files(n)}
-    upgrade_legacy(store, log)
-    relink_local_paths(store, log)
-    done = {}
-    known = declared()
-    for name in names or list(known):
-        ds = known[name]
-        if only_started and name not in started:
-            continue
-        why = stopped(store, ds)
-        if why:
-            log(f"{name}: not fetched ({why})")
-            continue
-        if ds.git and _repo(ds) is not None:
-            done[name] = fetch_git(store, ds, today, force, log)
-        else:
-            done[name] = _fetch_files(store, ds, today, force, session, log)
-    return done
+    """Fetch (or refresh) datasets: DatasetFetcher(store, today, session, log).fetch(names, force,
+    only_started). Returns {name: versions stored}."""
+    return DatasetFetcher(store, today, session, log).fetch(names, force, only_started)
 
 
 def _changed(counts: dict) -> int:
@@ -248,60 +383,11 @@ def relink_local_paths(store, log=print) -> int:
 
 
 def _fetch_files(store, ds: Dataset, today: date, force: bool, session, log) -> int:
-    name, n = ds.name, 0
-    single = len(ds.files(today)) == 1  # a file holding the whole dataset: what it drops is withdrawn
-    due = list(due_files(store, ds, today, force))
-    queue = _FileQueue(store, ds, log)
-    queue.plan(due)
-    for url, final in due:
-        file = url.rsplit("/", 1)[-1]
-        why = refusal(ds, url)
-        if why:
-            log(f"{name}: {file} not fetched ({why})")
-            queue.end(url, "failed", error=f"not fetched ({why})")
-            continue
-        queue.start(url)
-        try:
-            resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=120)
-            if resp.status_code == 404 and not final:
-                log(f"{name}: {file} not published yet")
-                queue.end(url, "done", detail="not published yet", requests=1)
-                continue
-            resp.raise_for_status()
-            parsed = ds.parse(url, resp.content)
-        except (requests.RequestException, ValueError, KeyError, zipfile.BadZipFile) as e:
-            log(f"{name}: {file} not fetched ({e}); tried again next time")  # the others go on
-            queue.end(url, "failed", error=str(e)[:300], requests=1)
-            continue
-        if not parsed.values and not parsed.constituents:
-            log(f"{name}: {file} had nothing to read (format changed?); not marked fetched")
-            queue.end(url, "failed", error="nothing to read (format changed?)", requests=1, bytes_=len(resp.content))
-            continue
-        blob = resp.content
-        sha = hashlib.sha256(blob).hexdigest()
-        prev = store.dataset_files(name).get(url)
-        if prev and prev["sha256"] == sha:
-            store.set_dataset_file(name, url, len(blob), prev["values"] or 0, closed=final, sha256=sha,
-                                   version_at=prev["version_at"], origin=sha, local_path=prev["local_path"])
-            log(f"{name}: {file} unchanged")
-            queue.end(url, "done", detail="unchanged", requests=1, bytes_=len(blob))
-            continue
-        version = _published_at(resp) or datetime.now(timezone.utc)
-        local = _keep(store, ds, file, blob, sha)
-        counts = store.save_dataset_version(ds.provider, name, parsed, _ms_dt(version), sha,
-                                            first_rule=ds.published if prev is None else None,
-                                            withdraw=single and prev is not None)
-        store.set_dataset_file(name, url, len(blob), _changed(counts), closed=final, sha256=sha, version_at=version,
-                               origin=sha, local_path=_relative(store, local))
-        _quality_prior(store, ds)
-        log(f"{name}: {file} ({len(blob) / 1e6:.2f} MB, published {version:%Y-%m-%d}): {_describe(counts)}"
-            + ("; final, closed" if final else ""))
-        queue.end(url, "done", detail=_describe(counts), requests=1, bytes_=len(blob), rows=_changed(counts))
-        n += 1
-    return n
+    """One dataset's due files downloaded: DatasetFetcher(store, today, session, log).files(ds, force)."""
+    return DatasetFetcher(store, today, session, log).files(ds, force)
 
 
-class _FileQueue:
+class FileQueue:
     """A dataset's files on the fetch queue (storage/queue.py; the Fetcher shows it), under its plugin
     and the publisher that declares it (the CFTC's: Federal's, part cftc): each due file waiting, then
     running, done or failed. Never the fetch's undoing: a queue write that fails is logged once."""
@@ -336,6 +422,9 @@ class _FileQueue:
         self._do("queue_end", self.plugin, self.part, "dataset file", url, state, title=self.title(url), **kw)
 
 
+_FileQueue = FileQueue  # its name before 1.5.0
+
+
 class GitError(RuntimeError):
     pass
 
@@ -368,55 +457,9 @@ def _git_ref(repo: Path) -> str:
 
 
 def fetch_git(store, ds: Dataset, today: date, force: bool = False, log=print, update: bool = True) -> int:
-    """Import every commit of a GitHub-hosted dataset's file not imported yet, oldest first, each a
-    published version at its commit time; then check the submodule out at the repository's newest
-    commit."""
-    repo, path = _repo(ds), ds.git[1]
-    files = store.dataset_files(ds.name)
-    git_files = {u: f for u, f in files.items() if u.startswith("git:")}
-    if git_files and not force and (today - max(f["fetched_at"] for f in git_files.values()).date()).days < ds.refresh_days:
-        return 0
-    why = refusal(ds, f"https://{GIT_HOST}/{ds.git[0]}") if update else None
-    if why:
-        log(f"{ds.name}: not updated from {GIT_HOST} ({why}); using the commits already here")
-    elif update:
-        try:
-            _git(repo, "fetch", "--quiet", "origin")
-        except GitError as e:
-            log(f"{ds.name}: could not update {ds.git[0]} ({e}); using the commits already here")
-    ref = _git_ref(repo)
-    commits = [line.split(" ", 1) for line in _git(repo, "log", "--reverse", "--format=%H %cI", ref, "--", path).splitlines()
-               if line.strip()]
-    if not git_files and files:
-        store.clear_dataset_files(ds.name)  # the downloads' ledger gives way to the commit history
-    seen = {f["origin"] for f in git_files.values()}
-    n, totals = 0, dict(new=0, revised=0, withdrawn=0, unchanged=0, joined=0, changed=0, left=0)
-    for sha, when in commits:
-        if sha in seen:
-            continue
-        t = datetime.fromisoformat(when)
-        blob = _git(repo, "show", f"{sha}:{path}", binary=True)
-        try:
-            parsed = ds.parse(path, blob)
-        except (ValueError, KeyError, csv.Error) as e:
-            log(f"{ds.name}: commit {sha[:8]} not readable ({e}); skipped")
-            parsed = Parsed()
-        url = f"git:{ds.git[0]}@{sha}"
-        if not parsed.values and not parsed.constituents:
-            store.set_dataset_file(ds.name, url, len(blob), 0, closed=True, version_at=t, origin=sha,
-                                   local_path=f"{ds.git[0]}/{path}")
-            continue
-        counts = store.save_dataset_version(ds.provider, ds.name, parsed, _ms_dt(t), sha,
-                                            first_rule=ds.published if not seen and n == 0 else None, withdraw=True)
-        store.set_dataset_file(ds.name, url, len(blob), _changed(counts), closed=True, version_at=t, origin=sha,
-                               local_path=f"{ds.git[0]}/{path}")
-        totals = {k: totals[k] + counts[k] for k in totals}
-        n += 1
-    if commits:
-        _git(repo, "checkout", "--quiet", "--detach", ref)  # the repository's newest commit: the file's latest version
-        _quality_prior(store, ds)
-    log(f"{ds.name}: {n} new commits of {ds.git[0]} ({len(commits)} in all)" + (f": {_describe(totals)}" if n else ""))
-    return n
+    """Import every commit of a GitHub-hosted dataset's file not imported yet: DatasetFetcher(store,
+    today, log=log).git(ds, force, update). Returns commits imported."""
+    return DatasetFetcher(store, today, log=log).git(ds, force, update)
 
 
 def upgrade_legacy(store, log=print) -> None:

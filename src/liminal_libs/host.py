@@ -96,7 +96,7 @@ class Host:
     def __init__(self, name: str, db_path: Path, idle: float | None = None, start: float = START_SECONDS, log=print):
         self.name, self.db_path = name, Path(db_path)
         self.idle = idle_seconds() if idle is None else idle
-        self.start = start
+        self.start_wait = start  # a new host waits this long for its first client
         self.log = log
         self.stop = threading.Event()  # set once the clients are gone (or the work must end): the work ends
         self.attached: dict[int, int] = {}  # each attachment -> its client's process id
@@ -108,6 +108,17 @@ class Host:
         self._touched: float | None = None  # when a page last touched this host (touch)
         self._seq = 0
         self.handle: Callable[[dict], object] | None = None  # answers a client's `ask` (a status, say)
+
+    @classmethod
+    def start(cls, name: str, db_path: Path) -> None:
+        """Start the host `name` as a process of its own: no window, outliving this process, on this
+        database (LIMINAL_DB in its environment). The hosts' code is the app's (APP_MODULE)."""
+        exe = Path(sys.executable)
+        pythonw = exe.with_name("pythonw.exe") if os.name == "nt" and exe.with_name("pythonw.exe").exists() else exe
+        flags = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0  # DETACHED | NEW_GROUP | NO_WINDOW
+        env = {**os.environ, "LIMINAL_DB": str(db_path)}
+        subprocess.Popen([str(pythonw), "-m", APP_MODULE, "host", name], creationflags=flags, close_fds=True, env=env,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def clients(self) -> list[int]:
         with self._lock:
@@ -228,8 +239,8 @@ class Host:
                 waited = time.monotonic() - self._idle_since
             if ever and waited >= self.idle:
                 self.end(f"no client attached for {self.idle:g} s")
-            elif not ever and waited >= self.start:
-                self.end(f"no client came within {self.start:g} s")
+            elif not ever and waited >= self.start_wait:
+                self.end(f"no client came within {self.start_wait:g} s")
 
 
 # -- the clients' side ---------------------------------------------------------------------------
@@ -281,6 +292,33 @@ class Attachment:
         self.detach()
         return False
 
+    @classmethod
+    def to(cls, name: str, db_path: Path, start: Callable[[], None] | None = None, wait: float = START_SECONDS,
+           log=print) -> "Attachment | None":
+        """Attach to the host `name` of this database: the one answering, or else one started by
+        `start` (None: no host answers and none was started, or the started one never answered)."""
+        conn = _connect(name, db_path)
+        if conn is None and start is not None:
+            start()
+            end = time.monotonic() + wait
+            while conn is None and time.monotonic() < end:
+                time.sleep(0.25)
+                conn = _connect(name, db_path)
+        if conn is None:
+            return None
+        try:
+            conn.send({"attach": name, "pid": os.getpid(), "api": API})
+            if not conn.poll(wait):
+                raise EOFError("no answer")
+            answer = conn.recv()
+            if not (isinstance(answer, dict) and answer.get("ok")):
+                raise EOFError(f"refused: {answer}")
+        except (EOFError, OSError) as e:
+            log(f"host {name}: could not attach ({e})")
+            conn.close()
+            return None
+        return cls(name, db_path, conn, int(answer.get("pid") or 0))
+
 
 def _connect(name: str, db_path: Path):
     try:
@@ -291,43 +329,17 @@ def _connect(name: str, db_path: Path):
 
 def attach(name: str, db_path: Path, start: Callable[[], None] | None = None, wait: float = START_SECONDS,
            log=print) -> Attachment | None:
-    """Attach to the host `name` of this database: the one answering, or else one started by
-    `start` (None: no host answers and none was started, or the started one never answered)."""
-    conn = _connect(name, db_path)
-    if conn is None and start is not None:
-        start()
-        end = time.monotonic() + wait
-        while conn is None and time.monotonic() < end:
-            time.sleep(0.25)
-            conn = _connect(name, db_path)
-    if conn is None:
-        return None
-    try:
-        conn.send({"attach": name, "pid": os.getpid(), "api": API})
-        if not conn.poll(wait):
-            raise EOFError("no answer")
-        answer = conn.recv()
-        if not (isinstance(answer, dict) and answer.get("ok")):
-            raise EOFError(f"refused: {answer}")
-    except (EOFError, OSError) as e:
-        log(f"host {name}: could not attach ({e})")
-        conn.close()
-        return None
-    return Attachment(name, db_path, conn, int(answer.get("pid") or 0))
+    """Attach to the host `name` of this database, the one answering or one started by `start`:
+    Attachment.to(...)."""
+    return Attachment.to(name, db_path, start, wait, log)
 
 
 APP_MODULE = "liminal_charts"  # the app's package: `python -m liminal_charts host NAME` runs a host (its cli, cmd_host)
 
 
 def start_host(name: str, db_path: Path) -> None:
-    """Start the host `name` as a process of its own: no window, outliving this process, on this
-    database (LIMINAL_DB in its environment). The hosts' code is the app's (APP_MODULE)."""
-    exe = Path(sys.executable)
-    pythonw = exe.with_name("pythonw.exe") if os.name == "nt" and exe.with_name("pythonw.exe").exists() else exe
-    flags = 0x00000008 | 0x00000200 | 0x08000000 if os.name == "nt" else 0  # DETACHED | NEW_GROUP | NO_WINDOW
-    env = {**os.environ, "LIMINAL_DB": str(db_path)}
-    subprocess.Popen([str(pythonw), "-m", APP_MODULE, "host", name], creationflags=flags, close_fds=True, env=env,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    """Start the host `name` as a process of its own on this database: Host.start(name, db_path)."""
+    Host.start(name, db_path)
 
 
 def attach_or_start(name: str, db_path: Path, log=print) -> Attachment | None:

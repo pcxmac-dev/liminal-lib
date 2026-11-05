@@ -33,96 +33,120 @@ def stopped(store, plugin: str, part: str | None = None, now: datetime | None = 
     return None
 
 
-def run_plugin(plugin: str, parts: list[tuple[str, Fetcher]], store, settings, log: Callable[[str], None] = print,
+class Runner:
+    """The fetcher's workers (the module's docstring): the store factory (each worker thread opens a
+    store of its own), the settings and the log. `run` runs every plugin that fetches on its own (or
+    the one named) in a worker thread each and returns each one's pass; `plugin` is one worker's pass
+    over a plugin's parts on a store: their plans on the queue, then its jobs one at a time until none
+    is due, it is stopped, or `limit` jobs are done. What stops a worker stays the module's `stopped`,
+    called through it."""
+
+    def __init__(self, store_factory: Callable[[], object], settings, log: Callable[[str], None] = print):
+        self.store_factory, self.settings, self.log = store_factory, settings, log
+
+    def plugin(self, plugin: str, parts: list[tuple[str, Fetcher]], store,
                clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc), limit: int | None = None) -> dict:
-    """One worker's pass: its parts' plans on the queue, then its jobs until none is due, it is
-    stopped, or `limit` jobs are done. Returns {"done", "failed", "held", "stopped"}."""
-    out = {"done": 0, "failed": 0, "held": 0, "stopped": None}
-    store.queue_reset(plugin)  # left running by a pass that ended before them
-    fetchers = {part: f for part, f in parts}
-    sent = [0]
+        """One worker's pass: its parts' plans on the queue, then its jobs until none is due, it is
+        stopped, or `limit` jobs are done. Returns {"done", "failed", "held", "stopped"}."""
+        settings, log = self.settings, self.log
+        out = {"done": 0, "failed": 0, "held": 0, "stopped": None}
+        store.queue_reset(plugin)  # left running by a pass that ended before them
+        fetchers = {part: f for part, f in parts}
+        sent = [0]
 
-    def count(n: int = 1) -> None:
-        sent[0] += n
-        store.count_request(plugin, n=n, now=clock())
+        def count(n: int = 1) -> None:
+            sent[0] += n
+            store.count_request(plugin, n=n, now=clock())
 
-    def ctx(part: str) -> FetchContext:
-        return FetchContext(plugin, settings, store, clock(), log, count,
-                            lambda: stopped(store, plugin, part, clock()) is not None)
+        def ctx(part: str) -> FetchContext:
+            return FetchContext(plugin, settings, store, clock(), log, count,
+                                lambda: stopped(store, plugin, part, clock()) is not None)
 
-    why = stopped(store, plugin, now=clock())
-    if why:
-        out["stopped"] = why
-        return out
-    for part, fetcher in parts:
-        try:
-            jobs = list(fetcher.plan(ctx(part)))
-        except Exception as e:  # noqa: BLE001 - a plugin's surprise: its part plans nothing this pass
-            log(f"{plugin}: {part}'s plan failed: {type(e).__name__}: {e}")
-            continue
-        by: dict[tuple[str, str], list[dict]] = {}
-        for j in jobs:
-            by.setdefault((j.part or part, j.kind), []).append(
-                {"key": j.key, "title": j.title or j.key, "detail": j.detail or None, "priority": j.priority,
-                 "not_before": j.not_before})
-        for (p, kind), items in by.items():
-            store.queue_put(plugin, p, kind, items, now=clock())
-    done = 0
-    while limit is None or done < limit:
         why = stopped(store, plugin, now=clock())
         if why:
             out["stopped"] = why
-            break
-        row = store.queue_claim(plugin, now=clock())
-        if row is None:
-            break
-        fetcher = fetchers.get(row["part"]) or next(iter(fetchers.values()))
-        job = Job(row["kind"], row["key"], row["title"], row["part"], row["detail"] or "", row["priority"])
-        sent[0] = 0
-        try:
-            got = fetcher.fetch(ctx(row["part"]), job)
-        except StopRun as e:
-            store.queue_end(plugin, row["part"], row["kind"], row["key"], "waiting", detail=f"stopped: {e}",
-                            requests=sent[0], now=clock())
-            out["stopped"] = str(e)
-            log(f"{plugin}: stopped ({e})")
-            break
-        except Exception as e:  # noqa: BLE001 - this job failed; the plugin's next goes on
-            store.queue_end(plugin, row["part"], row["kind"], row["key"], "failed", error=f"{type(e).__name__}: {e}"[:300],
-                            requests=sent[0], now=clock())
-            out["failed"] += 1
-            log(f"{plugin}: {row['title']}: {type(e).__name__}: {e}")
-            continue
-        state = "held" if got.again and got.again > clock() else "done"
-        store.queue_end(plugin, row["part"], row["kind"], row["key"], state, detail=got.detail or None,
-                        requests=got.requests or sent[0], rows=got.rows, bytes_=got.bytes, not_before=got.again,
-                        now=clock())
-        out[state] += 1
-        done += 1
-    return out
+            return out
+        for part, fetcher in parts:
+            try:
+                jobs = list(fetcher.plan(ctx(part)))
+            except Exception as e:  # noqa: BLE001 - a plugin's surprise: its part plans nothing this pass
+                log(f"{plugin}: {part}'s plan failed: {type(e).__name__}: {e}")
+                continue
+            by: dict[tuple[str, str], list[dict]] = {}
+            for j in jobs:
+                by.setdefault((j.part or part, j.kind), []).append(
+                    {"key": j.key, "title": j.title or j.key, "detail": j.detail or None, "priority": j.priority,
+                     "not_before": j.not_before})
+            for (p, kind), items in by.items():
+                store.queue_put(plugin, p, kind, items, now=clock())
+        done = 0
+        while limit is None or done < limit:
+            why = stopped(store, plugin, now=clock())
+            if why:
+                out["stopped"] = why
+                break
+            row = store.queue_claim(plugin, now=clock())
+            if row is None:
+                break
+            fetcher = fetchers.get(row["part"]) or next(iter(fetchers.values()))
+            job = Job(row["kind"], row["key"], row["title"], row["part"], row["detail"] or "", row["priority"])
+            sent[0] = 0
+            try:
+                got = fetcher.fetch(ctx(row["part"]), job)
+            except StopRun as e:
+                store.queue_end(plugin, row["part"], row["kind"], row["key"], "waiting", detail=f"stopped: {e}",
+                                requests=sent[0], now=clock())
+                out["stopped"] = str(e)
+                log(f"{plugin}: stopped ({e})")
+                break
+            except Exception as e:  # noqa: BLE001 - this job failed; the plugin's next goes on
+                store.queue_end(plugin, row["part"], row["kind"], row["key"], "failed", error=f"{type(e).__name__}: {e}"[:300],
+                                requests=sent[0], now=clock())
+                out["failed"] += 1
+                log(f"{plugin}: {row['title']}: {type(e).__name__}: {e}")
+                continue
+            state = "held" if got.again and got.again > clock() else "done"
+            store.queue_end(plugin, row["part"], row["kind"], row["key"], state, detail=got.detail or None,
+                            requests=got.requests or sent[0], rows=got.rows, bytes_=got.bytes, not_before=got.again,
+                            now=clock())
+            out[state] += 1
+            done += 1
+        return out
+
+    def run(self, only: str | None = None) -> dict[str, dict]:
+        """Every plugin that fetches on its own (`only`: that one), each in a worker thread of its own
+        with a store of its own; returns each one's pass. A worker's crash is its own."""
+        results: dict[str, dict] = {}
+
+        def work(plugin: str, parts) -> None:
+            try:
+                store = self.store_factory()
+                try:
+                    results[plugin] = self.plugin(plugin, parts, store)
+                finally:
+                    store.close()
+            except Exception as e:  # noqa: BLE001 - this worker's crash; the others go on
+                results[plugin] = {"error": f"{type(e).__name__}: {e}"}
+                self.log(f"{plugin}: worker failed: {type(e).__name__}: {e}")
+
+        threads = [threading.Thread(target=work, args=(p, parts), name=f"fetch-{p}", daemon=True)
+                   for p, parts in plugin_fetchers().items() if only in (None, p)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return results
+
+
+def run_plugin(plugin: str, parts: list[tuple[str, Fetcher]], store, settings, log: Callable[[str], None] = print,
+               clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc), limit: int | None = None) -> dict:
+    """One worker's pass over a plugin's parts on `store`: Runner(lambda: store, settings,
+    log).plugin(...). Returns {"done", "failed", "held", "stopped"}."""
+    return Runner(lambda: store, settings, log).plugin(plugin, parts, store, clock, limit)
 
 
 def run_all(store_factory: Callable[[], object], settings, log: Callable[[str], None] = print,
             only: str | None = None) -> dict[str, dict]:
-    """Every plugin that fetches on its own (`only`: that one), each in a worker thread of its own
-    with a store of its own; returns each one's pass. A worker's crash is its own."""
-    results: dict[str, dict] = {}
-
-    def work(plugin: str, parts) -> None:
-        try:
-            store = store_factory()
-            try:
-                results[plugin] = run_plugin(plugin, parts, store, settings, log)
-            finally:
-                store.close()
-        except Exception as e:  # noqa: BLE001 - this worker's crash; the others go on
-            results[plugin] = {"error": f"{type(e).__name__}: {e}"}
-            log(f"{plugin}: worker failed: {type(e).__name__}: {e}")
-
-    threads = [threading.Thread(target=work, args=(p, parts), name=f"fetch-{p}", daemon=True)
-               for p, parts in plugin_fetchers().items() if only in (None, p)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return results
+    """Every plugin that fetches on its own, each in a worker thread with a store of its own:
+    Runner(store_factory, settings, log).run(only). Returns each one's pass."""
+    return Runner(store_factory, settings, log).run(only)

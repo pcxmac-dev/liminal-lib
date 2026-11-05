@@ -166,63 +166,6 @@ def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str, ex
             for t, o, h, l, c, v, w, n in zip(g.index, g["o"], g["h"], g["l"], g["c"], g["v"], vw, g["n"])]
 
 
-def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock", exchange: str | None = None) -> int:
-    """Build (or rebuild) the frames above one base frame (CHAINS) for one series from what
-    changed since the last build. Returns bars stored."""
-    frames = dict(CHAINS)[base]
-    key = KEY.format(source, ticker, base) + (f":c{CHAIN_VERSIONS[base]}" if base in CHAIN_VERSIONS else "")
-    started = int(time_module.time() * 1000)
-    built_to = int(store.kv_get(key) or -1)
-    edges = store.bar_edges(source, ticker, base)
-    if edges is None:
-        return 0
-    dirty = take_dirty(store, source, ticker, base)  # bad data pruned there: what was built over it goes (done_dirty)
-    if built_to < 0:  # a first build covers everything held (bars from before stored_at have none)
-        lo, hi = edges
-    else:
-        changed = store.changed_span(source, ticker, base, built_to)
-        if dirty:
-            changed = (min([dirty[0]] + ([changed[0]] if changed else [])),
-                       max([dirty[1]] + ([changed[1]] if changed else [])))
-        if changed is None:
-            return 0
-        lo, hi = edges if base == "day" else changed  # weeks, months, years: all again
-    zone = day_zone(asset)
-    first = datetime.fromtimestamp(lo / 1000, zone).date() - timedelta(days=1)
-    last = datetime.fromtimestamp(hi / 1000, zone).date() + timedelta(days=2)  # a session dated by the day it ends
-    did = provenance.record(store, "bars-from-bars", f"{source}:{ticker}", {
-        "from": base, "frames": [label(t, m) for t, m in frames],
-        "days": "UTC dates" if zone is timezone.utc else
-                ("New York dates, regular session" if asset in ("stock", "index") else "New York dates"),
-        "method": "first open, highest high, lowest low, last close, summed volume and trades, volume-weighted "
-                  "average price; the feed's own bars first, built ones where it sent none; only upward"},
-        {"bars": f"{source}:{ticker}:{base}"}, (_midnight_ms(first, zone), _midnight_ms(last, zone)))
-    stored = 0
-    if base == "day":  # weeks, months, years: rebuilt whole, so a bin left without days goes
-        for timespan, multiplier in frames:
-            store.drop_built_frame(source, ticker, timespan, multiplier, 0, 2**62)
-    day = first
-    while day < last:
-        end = min(last, day + timedelta(days=CHUNK_DAYS.get(base, 100_000)))
-        lo_ms, hi_ms = _midnight_ms(day, zone), _midnight_ms(end, zone)
-        window = store.bars_window([source], ticker, base, lo_ms - DAY_MS, hi_ms + DAY_MS)  # whole bins at the edges
-        for timespan, multiplier in frames:
-            if base != "day":  # bins left without base bars go (weeks to years: all rebuilt below)
-                store.drop_built_frame(source, ticker, timespan, multiplier, lo_ms, hi_ms)
-            if len(window):
-                bins = aggregate(window, timespan, multiplier, asset, exchange)
-                if base != "day":  # this chunk's bins; the margin's belong to the chunks either side
-                    bins = [b for b in bins if lo_ms <= b["t"] < hi_ms]
-                stored += store.upsert_built_bars(source, ticker, timespan, multiplier, bins, did)
-        day = end
-    store.set_derivation_rows(did, stored)
-    # Bars stored before this build started reading are in it, but a write committed late can
-    # carry an earlier stored_at: the next build looks again from a minute before.
-    store.kv_set(key, str(started - SLACK_MS))
-    done_dirty(store, source, ticker, base, dirty)
-    return stored
-
-
 DIRTY_KEY = "derive:dirty:{}:{}:{}"  # source, ticker, base -> [lo, hi] ms built again whatever its stored_at
 
 
@@ -247,11 +190,6 @@ def done_dirty(store, source: str, ticker: str, base: str, taken: tuple[int, int
     if taken is not None:
         store.kv_update(DIRTY_KEY.format(source, ticker.upper(), base),
                         lambda held: None if held and (int(held[0]), int(held[1])) == taken else held, None)
-
-
-def build_series(store, source: str, ticker: str, asset: str = "stock", log=print) -> int:
-    """The frames built from a series' 1-minute bars (see build_chain). Returns bars stored."""
-    return build_chain(store, source, ticker, "minute", asset)
 
 
 LEASE_KEY = "derive:lease:{}:{}"  # source, ticker -> {pid, start, until}: the process building it
@@ -285,46 +223,24 @@ def drop_lease(store, source: str, ticker: str) -> None:
     store.kv_update(LEASE_KEY.format(source, ticker), lambda held: {} if held.get("pid") == pid else held, {})
 
 
-def build_symbol(store, source: str, ticker: str, asset: str = "stock", log=print,
-                 progress: tuple[int, int] = (1, 1), exchange: str | None = None) -> int:
-    """Every frame above every base frame one series holds (CHAINS: seconds, then minutes, then
-    days, so days built from minutes feed the weeks), from what changed since its last build.
-    `progress` (n, of) is what the status bar shows while it builds. One build of a series at a
-    time across processes (take_lease): another one going on, it is left to that. `exchange`: the
-    MIC of a listing outside the US (found from its watch row when not given). Returns bars stored."""
-    if asset == "stock" and exchange is None:
-        exchange = exchange_of(store, source, ticker)
-    if not take_lease(store, source, ticker):
-        log(f"derive {source}:{ticker}: another process is building it; left to that one")
-        return 0
-    try:
-        return _build_symbol(store, source, ticker, asset, log, progress, exchange)
-    finally:
-        drop_lease(store, source, ticker)
+class Lease:
+    """The build of one series' frames claimed for this process (`with Lease(store, source, ticker)
+    as taken:`): `taken` says whether it was (take_lease: False while another live process holds an
+    unexpired lease), and a lease taken here is dropped on leaving (drop_lease), another's never."""
 
+    def __init__(self, store, source: str, ticker: str, now_ms: int | None = None):
+        self.store, self.source, self.ticker, self.now_ms = store, source, ticker, now_ms
+        self.taken = False
 
-def _build_symbol(store, source: str, ticker: str, asset: str, log, progress: tuple[int, int],
-                  exchange: str | None = None) -> int:
-    from . import baddata
+    def __enter__(self) -> bool:
+        self.taken = take_lease(self.store, self.source, self.ticker, self.now_ms)
+        return self.taken
 
-    try:  # bad data first (baddata.py): the frames above are then built without it
-        pruned = baddata.scan_symbol(store, source, ticker, asset, exchange)
-        if pruned:
-            log(f"bad data {source}:{ticker}: {pruned:,} bars on the pruned list (left out of the filtered view)")
-    except Exception as e:  # a failing check must not stop the build; it is tried again next time
-        log(f"bad data {source}:{ticker}: check failed ({type(e).__name__}: {e})")
-    total = 0
-    for base, frames in CHAINS:
-        if store.bar_edges(source, ticker, base) is None:
-            continue
-        store.kv_set(PROGRESS_KEY, json.dumps({
-            "source": source, "ticker": ticker, "from": label(base), "to": [label(t, m) for t, m in frames],
-            "n": progress[0], "of": progress[1], "at": int(time_module.time() * 1000)}))
-        n = build_chain(store, source, ticker, base, asset, exchange)
-        if n:
-            log(f"derive {source}:{ticker}: {n:,} bars for {', '.join(label(t, m) for t, m in frames)} from {label(base)}")
-        total += n
-    return total
+    def __exit__(self, *exc) -> bool:
+        if self.taken:
+            drop_lease(self.store, self.source, self.ticker)
+            self.taken = False
+        return False
 
 
 def exchange_of(store, source: str, ticker: str) -> str | None:
@@ -347,29 +263,161 @@ def asset_of(store, source: str, ticker: str) -> str:
     return "future" if ticker.upper() in contracts else "stock"
 
 
+class Builder:
+    """The building of the feeds' derived frames in a store (the module's docstring): the store and
+    the log. `chain` builds the frames above one base frame of one series from what changed since
+    the last build (its mark, the dirty span); `symbol` every chain of one series, its bad data
+    checked first (baddata.scan_symbol), one build of a series at a time across processes (Lease);
+    `run` every series of the feeds given, with the progress the status bar shows. The binning stays
+    the module's `aggregate` (vectorised), the marks and leases its functions (mark_dirty, take_dirty,
+    done_dirty, take_lease, drop_lease), all called through the module."""
+
+    def __init__(self, store, log=print):
+        self.store, self.log = store, log
+
+    def chain(self, source: str, ticker: str, base: str, asset: str = "stock", exchange: str | None = None) -> int:
+        """Build (or rebuild) the frames above one base frame (CHAINS) for one series from what
+        changed since the last build. Returns bars stored."""
+        store = self.store
+        frames = dict(CHAINS)[base]
+        key = KEY.format(source, ticker, base) + (f":c{CHAIN_VERSIONS[base]}" if base in CHAIN_VERSIONS else "")
+        started = int(time_module.time() * 1000)
+        built_to = int(store.kv_get(key) or -1)
+        edges = store.bar_edges(source, ticker, base)
+        if edges is None:
+            return 0
+        dirty = take_dirty(store, source, ticker, base)  # bad data pruned there: what was built over it goes (done_dirty)
+        if built_to < 0:  # a first build covers everything held (bars from before stored_at have none)
+            lo, hi = edges
+        else:
+            changed = store.changed_span(source, ticker, base, built_to)
+            if dirty:
+                changed = (min([dirty[0]] + ([changed[0]] if changed else [])),
+                           max([dirty[1]] + ([changed[1]] if changed else [])))
+            if changed is None:
+                return 0
+            lo, hi = edges if base == "day" else changed  # weeks, months, years: all again
+        zone = day_zone(asset)
+        first = datetime.fromtimestamp(lo / 1000, zone).date() - timedelta(days=1)
+        last = datetime.fromtimestamp(hi / 1000, zone).date() + timedelta(days=2)  # a session dated by the day it ends
+        did = provenance.record(store, "bars-from-bars", f"{source}:{ticker}", {
+            "from": base, "frames": [label(t, m) for t, m in frames],
+            "days": "UTC dates" if zone is timezone.utc else
+                    ("New York dates, regular session" if asset in ("stock", "index") else "New York dates"),
+            "method": "first open, highest high, lowest low, last close, summed volume and trades, volume-weighted "
+                      "average price; the feed's own bars first, built ones where it sent none; only upward"},
+            {"bars": f"{source}:{ticker}:{base}"}, (_midnight_ms(first, zone), _midnight_ms(last, zone)))
+        stored = 0
+        if base == "day":  # weeks, months, years: rebuilt whole, so a bin left without days goes
+            for timespan, multiplier in frames:
+                store.drop_built_frame(source, ticker, timespan, multiplier, 0, 2**62)
+        day = first
+        while day < last:
+            end = min(last, day + timedelta(days=CHUNK_DAYS.get(base, 100_000)))
+            lo_ms, hi_ms = _midnight_ms(day, zone), _midnight_ms(end, zone)
+            window = store.bars_window([source], ticker, base, lo_ms - DAY_MS, hi_ms + DAY_MS)  # whole bins at the edges
+            for timespan, multiplier in frames:
+                if base != "day":  # bins left without base bars go (weeks to years: all rebuilt below)
+                    store.drop_built_frame(source, ticker, timespan, multiplier, lo_ms, hi_ms)
+                if len(window):
+                    bins = aggregate(window, timespan, multiplier, asset, exchange)
+                    if base != "day":  # this chunk's bins; the margin's belong to the chunks either side
+                        bins = [b for b in bins if lo_ms <= b["t"] < hi_ms]
+                    stored += store.upsert_built_bars(source, ticker, timespan, multiplier, bins, did)
+            day = end
+        store.set_derivation_rows(did, stored)
+        # Bars stored before this build started reading are in it, but a write committed late can
+        # carry an earlier stored_at: the next build looks again from a minute before.
+        store.kv_set(key, str(started - SLACK_MS))
+        done_dirty(store, source, ticker, base, dirty)
+        return stored
+
+    def symbol(self, source: str, ticker: str, asset: str = "stock", progress: tuple[int, int] = (1, 1),
+               exchange: str | None = None) -> int:
+        """Every frame above every base frame one series holds (CHAINS: seconds, then minutes, then
+        days, so days built from minutes feed the weeks), from what changed since its last build.
+        `progress` (n, of) is what the status bar shows while it builds. One build of a series at a
+        time across processes (Lease): another one going on, it is left to that. `exchange`: the
+        MIC of a listing outside the US (found from its watch row when not given). Returns bars stored."""
+        if asset == "stock" and exchange is None:
+            exchange = exchange_of(self.store, source, ticker)
+        with Lease(self.store, source, ticker) as taken:
+            if not taken:
+                self.log(f"derive {source}:{ticker}: another process is building it; left to that one")
+                return 0
+            return self._symbol(source, ticker, asset, progress, exchange)
+
+    def _symbol(self, source: str, ticker: str, asset: str, progress: tuple[int, int], exchange: str | None) -> int:
+        from . import baddata
+
+        store, log = self.store, self.log
+        try:  # bad data first (baddata.py): the frames above are then built without it
+            pruned = baddata.scan_symbol(store, source, ticker, asset, exchange)
+            if pruned:
+                log(f"bad data {source}:{ticker}: {pruned:,} bars on the pruned list (left out of the filtered view)")
+        except Exception as e:  # a failing check must not stop the build; it is tried again next time
+            log(f"bad data {source}:{ticker}: check failed ({type(e).__name__}: {e})")
+        total = 0
+        for base, frames in CHAINS:
+            if store.bar_edges(source, ticker, base) is None:
+                continue
+            store.kv_set(PROGRESS_KEY, json.dumps({
+                "source": source, "ticker": ticker, "from": label(base), "to": [label(t, m) for t, m in frames],
+                "n": progress[0], "of": progress[1], "at": int(time_module.time() * 1000)}))
+            n = self.chain(source, ticker, base, asset, exchange)
+            if n:
+                log(f"derive {source}:{ticker}: {n:,} bars for {', '.join(label(t, m) for t, m in frames)} from {label(base)}")
+            total += n
+        return total
+
+    def run(self, sources=None, tickers=None) -> int:
+        """Build the frames above every base frame of every series on the given feeds (every feed by
+        default), or for the given tickers only: seconds, then minutes, then days (days built from
+        minutes feed the weeks). Returns bars stored."""
+        store = self.store
+        wanted = {t.upper() for t in tickers} if tickers else None
+        watch = store.watchlist()
+        assets = {(w["source"], w["ticker"]): w["asset"] for w in watch}
+        any_feed = {w["ticker"]: w["asset"] for w in watch}  # a symbol's class on whichever feed watches it
+        contracts = {c["ticker"] for w in watch if w["asset"] == "future"
+                     for c in store.contracts(w["source"], w["source_ticker"])}  # stored under contract tickers
+        bases = dict.fromkeys(base for base, _ in CHAINS)
+        series: dict[tuple[str, str], set] = {}
+        for source, ticker, kind in store.stored_series():
+            if kind not in bases or (sources and source not in sources) or (wanted and ticker not in wanted):
+                continue
+            # The composite model (composite.py builds its minutes and days) gets the frames above them
+            # like any feed: every level of every series, built upward from what it holds.
+            series.setdefault((source, ticker), set()).add(kind)
+        total = 0
+        for i, ((source, ticker), kinds) in enumerate(sorted(series.items())):
+            asset = assets.get((source, ticker)) or any_feed.get(ticker) or ("future" if ticker in contracts else "stock")
+            total += self.symbol(source, ticker, asset, progress=(i + 1, len(series)))
+        if series:
+            store.kv_set(PROGRESS_KEY, "")
+        store.prune_changes()  # the change log's old minutes (at most hourly)
+        return total
+
+
+def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock", exchange: str | None = None) -> int:
+    """Build (or rebuild) the frames above one base frame for one series from what changed since the
+    last build: Builder(store).chain(...). Returns bars stored."""
+    return Builder(store).chain(source, ticker, base, asset, exchange)
+
+
+def build_series(store, source: str, ticker: str, asset: str = "stock", log=print) -> int:
+    """The frames built from a series' 1-minute bars (see Builder.chain). Returns bars stored."""
+    return Builder(store, log).chain(source, ticker, "minute", asset)
+
+
+def build_symbol(store, source: str, ticker: str, asset: str = "stock", log=print,
+                 progress: tuple[int, int] = (1, 1), exchange: str | None = None) -> int:
+    """Every frame above every base frame one series holds, from what changed since its last build:
+    Builder(store, log).symbol(...). Returns bars stored."""
+    return Builder(store, log).symbol(source, ticker, asset, progress, exchange)
+
+
 def run(store, sources=None, tickers=None, log=print) -> int:
     """Build the frames above every base frame of every series on the given feeds (every feed by
-    default), or for the given tickers only: seconds, then minutes, then days (days built from
-    minutes feed the weeks). Returns bars stored."""
-    wanted = {t.upper() for t in tickers} if tickers else None
-    watch = store.watchlist()
-    assets = {(w["source"], w["ticker"]): w["asset"] for w in watch}
-    any_feed = {w["ticker"]: w["asset"] for w in watch}  # a symbol's class on whichever feed watches it
-    contracts = {c["ticker"] for w in watch if w["asset"] == "future"
-                 for c in store.contracts(w["source"], w["source_ticker"])}  # stored under contract tickers
-    bases = dict.fromkeys(base for base, _ in CHAINS)
-    series: dict[tuple[str, str], set] = {}
-    for source, ticker, kind in store.stored_series():
-        if kind not in bases or (sources and source not in sources) or (wanted and ticker not in wanted):
-            continue
-        # The composite model (composite.py builds its minutes and days) gets the frames above them
-        # like any feed: every level of every series, built upward from what it holds.
-        series.setdefault((source, ticker), set()).add(kind)
-    total = 0
-    for i, ((source, ticker), kinds) in enumerate(sorted(series.items())):
-        asset = assets.get((source, ticker)) or any_feed.get(ticker) or ("future" if ticker in contracts else "stock")
-        total += build_symbol(store, source, ticker, asset, log=log, progress=(i + 1, len(series)))
-    if series:
-        store.kv_set(PROGRESS_KEY, "")
-    store.prune_changes()  # the change log's old minutes (at most hourly)
-    return total
+    default), or for the given tickers only: Builder(store, log).run(...). Returns bars stored."""
+    return Builder(store, log).run(sources, tickers)

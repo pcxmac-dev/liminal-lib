@@ -71,82 +71,103 @@ def load_bulk(store) -> list[str]:
     return store.kv_json(BULK_KEY, [])
 
 
+class Initializer:
+    """The initializer's run (`initialize`): the store, the feeds the stocks go on, the feeds the
+    futures go on (`futures_feeds`), the directory's source and the time it ran; `run` watches every
+    listing of the exchanges chosen and keeps the ranking. What a run reads once: the watch rows
+    (`have`: what is watched already, by feed; `watched`: the symbols chosen one by one, not bulk),
+    the bulk symbols (BULK_KEY) and the plugins (what each feed can carry)."""
+
+    def __init__(self, store, feeds, futures_feeds=(), source: str = "massive", now: datetime | None = None):
+        self.store, self.source, self.now = store, source, now
+        self.feeds, self.futures_feeds = list(feeds), list(futures_feeds)
+        self.have: set[tuple[str, str]] = set()
+        self.watched: set[str] = set()
+
+    def run(self, exchanges=EXCHANGES, by: str = "value", dry_run: bool = False) -> dict:
+        """Watch every active stock listing on `exchanges` on each of the feeds, most traded first
+        (see Store.listings_by_volume), and every futures product of the CME Group exchanges among
+        them as its continuous chart on each of the futures feeds (futures_rank); keep the ranking
+        for the sync. Returns what it did (or, with `dry_run`, would do): {listed, ranked, added:
+        {feed: n}, top: [tickers], futures: {listed, added, top}}."""
+        store, source = self.store, self.source
+        stock_mics = [e for e in exchanges if e not in CME_GROUP]
+        future_mics = [e for e in exchanges if e in CME_GROUP]
+        ranked = store.listings_by_volume(source, stock_mics, by, skip_types=SKIP_TYPES) if stock_mics else []
+        self.have = have = {(w["source"], w["ticker"]) for w in store.watchlist()}
+        self.watched = watched = {t for _, t in have}  # chosen one by one before: not bulk, whichever feeds it gets added to
+        added, bulk = {}, set(load_bulk(store))
+        from .sources import providers
+        from .symbols import stock_spec
+
+        plugins = providers()
+        for feed in self.feeds if stock_mics else ():
+            new: dict[str, list[str]] = {}
+            p = plugins.get(feed)
+            for r in ranked:
+                if (feed, r["ticker"]) not in have and (p is None or p.can_carry(stock_spec(r["ticker"], r["exchange"]))):
+                    new.setdefault(r["exchange"], []).append(r["ticker"])  # a listing abroad goes to the feeds carrying it
+            added[feed] = sum(len(t) for t in new.values())
+            bulk |= {t for tickers in new.values() for t in tickers if t not in watched}
+            if not dry_run:
+                for mic, tickers in new.items():  # one transaction per exchange
+                    store.watch(feed, tickers, bulk_resolution(feed, "stock"), exchange=mic)
+        futures = self._futures(future_mics, dry_run) if future_mics else None
+        order = load_order(store)
+        if ranked:  # the stocks ranked afresh; futures and symbols watched one by one keep their places
+            order = {t: r for t, r in order.items() if t not in {x["ticker"] for x in ranked}}
+            shift = len(ranked)
+            order = {**{r["ticker"]: i for i, r in enumerate(ranked)}, **{t: shift + r for t, r in order.items()}}
+        if futures:  # after the stocks, most traded first
+            start = max(order.values(), default=-1) + 1
+            order |= {f"{f['ticker']}1!": start + i for i, f in enumerate(futures.pop("ranked"))}
+        out = {"listed": len(ranked), "ranked": sum(r["measure"] is not None for r in ranked), "added": added,
+               "top": [r["ticker"] for r in ranked[:20]], "exchanges": list(exchanges), "by": by}
+        if futures is not None:
+            out["futures"] = futures
+        if not dry_run:
+            store.kv_set(BULK_KEY, json.dumps(sorted(bulk)))
+            store.kv_set(ORDER_KEY, json.dumps(order))
+            store.kv_set(DONE_KEY, json.dumps({**out, "at": (self.now or datetime.now(timezone.utc)).isoformat(timespec="seconds")}))
+        return out
+
+    def _futures(self, mics: list[str], dry_run: bool) -> dict:
+        """Every futures product on `mics` onto the futures feeds as its continuous chart (PRODUCT1!),
+        in futures_rank's order. A product code the symbol rules cannot read is skipped and counted."""
+        from .symbols import resolve
+
+        store = self.store
+        ranked = sorted(store.futures_products(self.source, mics), key=futures_rank)
+        specs, unreadable = [], []
+        for f in ranked:
+            try:
+                spec = resolve(f"{f['ticker']}1!")
+            except ValueError:
+                unreadable.append(f["ticker"])
+                continue
+            if spec.asset == "future":
+                specs.append(spec)
+            else:
+                unreadable.append(f["ticker"])
+        added = {}
+        for feed in self.futures_feeds:
+            new = [s for s in specs if (feed, s.ticker) not in self.have]
+            added[feed] = len(new)
+            if not dry_run:
+                for spec in new:
+                    store.watch_spec(feed, spec, bulk_resolution(feed, "future"))
+        by_mic: dict[str, int] = {}
+        for f in ranked:
+            by_mic[f["exchange"]] = by_mic.get(f["exchange"], 0) + 1
+        readable = {s.source_ticker for s in specs}
+        return {"listed": len(ranked), "byExchange": by_mic, "added": added, "unreadable": unreadable,
+                "top": [f"{f['ticker']}1!" for f in ranked[:20] if f["ticker"] in readable],
+                "ranked": [f for f in ranked if f["ticker"] in readable]}
+
+
 def initialize(store, feeds: list[str], exchanges=EXCHANGES, by: str = "value", source: str = "massive",
                dry_run: bool = False, now: datetime | None = None, futures_feeds: list[str] = ()) -> dict:
-    """Watch every active stock listing on `exchanges` on each of `feeds`, most traded first (see
-    Store.listings_by_volume), and every futures product of the CME Group exchanges among them as
-    its continuous chart on each of `futures_feeds` (futures_rank); keep the ranking for
-    the sync. Returns what it did (or, with `dry_run`, would do): {listed, ranked, added: {feed: n},
-    top: [tickers], futures: {listed, added, top}}."""
-    stock_mics = [e for e in exchanges if e not in CME_GROUP]
-    future_mics = [e for e in exchanges if e in CME_GROUP]
-    ranked = store.listings_by_volume(source, stock_mics, by, skip_types=SKIP_TYPES) if stock_mics else []
-    have = {(w["source"], w["ticker"]) for w in store.watchlist()}
-    watched = {t for _, t in have}  # chosen one by one before: not bulk, whichever feeds it gets added to
-    added, bulk = {}, set(load_bulk(store))
-    from .sources import providers
-    from .symbols import stock_spec
-
-    plugins = providers()
-    for feed in feeds if stock_mics else ():
-        new: dict[str, list[str]] = {}
-        p = plugins.get(feed)
-        for r in ranked:
-            if (feed, r["ticker"]) not in have and (p is None or p.can_carry(stock_spec(r["ticker"], r["exchange"]))):
-                new.setdefault(r["exchange"], []).append(r["ticker"])  # a listing abroad goes to the feeds carrying it
-        added[feed] = sum(len(t) for t in new.values())
-        bulk |= {t for tickers in new.values() for t in tickers if t not in watched}
-        if not dry_run:
-            for mic, tickers in new.items():  # one transaction per exchange
-                store.watch(feed, tickers, bulk_resolution(feed, "stock"), exchange=mic)
-    futures = _futures(store, future_mics, futures_feeds, source, have, dry_run) if future_mics else None
-    order = load_order(store)
-    if ranked:  # the stocks ranked afresh; futures and symbols watched one by one keep their places
-        order = {t: r for t, r in order.items() if t not in {x["ticker"] for x in ranked}}
-        shift = len(ranked)
-        order = {**{r["ticker"]: i for i, r in enumerate(ranked)}, **{t: shift + r for t, r in order.items()}}
-    if futures:  # after the stocks, most traded first
-        start = max(order.values(), default=-1) + 1
-        order |= {f"{f['ticker']}1!": start + i for i, f in enumerate(futures.pop("ranked"))}
-    out = {"listed": len(ranked), "ranked": sum(r["measure"] is not None for r in ranked), "added": added,
-           "top": [r["ticker"] for r in ranked[:20]], "exchanges": list(exchanges), "by": by}
-    if futures is not None:
-        out["futures"] = futures
-    if not dry_run:
-        store.kv_set(BULK_KEY, json.dumps(sorted(bulk)))
-        store.kv_set(ORDER_KEY, json.dumps(order))
-        store.kv_set(DONE_KEY, json.dumps({**out, "at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")}))
-    return out
-
-
-def _futures(store, mics: list[str], feeds: list[str], source: str, have: set, dry_run: bool) -> dict:
-    """Every futures product on `mics` onto `feeds` as its continuous chart (PRODUCT1!), in
-    futures_rank's order. A product code the symbol rules cannot read is skipped and counted."""
-    from .symbols import resolve
-
-    ranked = sorted(store.futures_products(source, mics), key=futures_rank)
-    specs, unreadable = [], []
-    for f in ranked:
-        try:
-            spec = resolve(f"{f['ticker']}1!")
-        except ValueError:
-            unreadable.append(f["ticker"])
-            continue
-        if spec.asset == "future":
-            specs.append(spec)
-        else:
-            unreadable.append(f["ticker"])
-    added = {}
-    for feed in feeds:
-        new = [s for s in specs if (feed, s.ticker) not in have]
-        added[feed] = len(new)
-        if not dry_run:
-            for spec in new:
-                store.watch_spec(feed, spec, bulk_resolution(feed, "future"))
-    by_mic: dict[str, int] = {}
-    for f in ranked:
-        by_mic[f["exchange"]] = by_mic.get(f["exchange"], 0) + 1
-    readable = {s.source_ticker for s in specs}
-    return {"listed": len(ranked), "byExchange": by_mic, "added": added, "unreadable": unreadable,
-            "top": [f"{f['ticker']}1!" for f in ranked[:20] if f["ticker"] in readable],
-            "ranked": [f for f in ranked if f["ticker"] in readable]}
+    """Watch every listing of `exchanges` on `feeds` (and the CME Group's products on
+    `futures_feeds`), most traded first, and keep the ranking: Initializer(...).run(...) (its
+    docstring). Returns what it did, or with `dry_run` would do."""
+    return Initializer(store, feeds, futures_feeds, source, now).run(exchanges, by, dry_run)
