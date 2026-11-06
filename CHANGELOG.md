@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.7.0 (2026-11-05)
+
+The apps' frame (the user, 2026-11-04: "define all this stuff in liminal libs ... the library basically
+facilitates the interprocess communication, the way the apps can bind to each other, or interoperate,
+or seamlessly connect ... As well as the framework for the graphics. The common themes and drawing
+methods"; what is particular to one app stays in that app's repo), built for the first app on it,
+liminal-login.
+
+- `web.py`, moved here from the charts app's gui/web.py: what every app's server shares (`listening`,
+  `send`, `send_json`, `local_only`, `from_this_app`, `cookie`, `profile_cookie`, `static_file(handler,
+  rel, dirs)` reading the first of the folders given, `MAX_BODY`, `WRITE_HEADER`).
+- `ui/static/`: `icons.js` (moved from the charts app; the `user`, `key`, `eye`, `eyeoff`, `trash` and
+  `logout` icons added) and `liminal.css` (the themes' variables, the base controls, the rail, a small
+  app's page); `ui.STATIC` is served beside every app's own files.
+- `apps/`: `App` (an app's NAME, TITLE, master ICON, PORT and PORT_VAR, its STATIC folder; `tray()`,
+  `items()`, `api(handler, method, path, query, body)` for its routes, `page()`, `start()`/`stop()`/
+  `serve()` at its port on 127.0.0.1 alone, a taken port replaced by a free one; `GET /api/tray` and
+  `GET /api/app` answered by the frame; every write needs the write header and a JSON object), `Refused`,
+  `Tray` and `TrayItem` (the master icon first, then the app's view plugins; the dividers between
+  bound apps' trays come with the binding), and `LoginClient` (`sign_in`, `sign_out`, `user`, `pairs`,
+  `vector`, `put`, `remove`; `key(plugin)`, `account(plugin)`, `password(plugin)` for the pairs named
+  `<plugin>-account-api-key` and the like; the session token in `X-Liminal-Session`; `LoginRefused`,
+  `LoginUnreachable`; LIMINAL_LOGIN_URL, 8795 by default).
+- Tests: tests/test_apps.py.
+
 ## 1.6.0 (2026-11-04)
 
 The data specs, plugin API 2.1 (`sources/data.py`; the user, 2026-11-03: "every plugin needs to furnish

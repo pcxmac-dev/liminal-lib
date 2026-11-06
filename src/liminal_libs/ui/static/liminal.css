@@ -1,0 +1,139 @@
+/* The apps' common look (liminal-libs ui/static): the themes' variables, the base controls, the
+   rail of icons on the right (every app's tray) and a small app's page. The chart app's style.css
+   carries the same variables and rail rules until it moves onto this file (0.3.0). */
+:root {
+  --bg: #131722;
+  --panel: #1e222d;
+  --border: #2a2e39;
+  --text: #d1d4dc;
+  --muted: #787b86;
+  --accent: #2962ff;
+  --hover: #2a2e39;
+  --up: #26a69a;
+  --down: #ef5350;
+}
+/* Light: a soft grey page rather than white (less glare), near-black text and darker secondary
+   text, borders that are visible. Text areas sit on a lighter surface than the page. */
+body.light {
+  --bg: #e4e7ed;
+  --panel: #eef0f4;
+  --frame: #cdd3dd;
+  --card: #f3f4f7;
+  --field: #f5f6f9;
+  --border: #bfc5d1;
+  --text: #0f1219;
+  --muted: #474c59;
+  --accent: #1f4fd8;
+  --hover: #d6dbe5;
+  --up: #086a60;
+  --down: #c62828;
+}
+/* More themes: Midnight and Graphite are dark-based, Paper is light-based (it also gets body.light,
+   whose rules it overrides colour by colour). */
+body[data-theme="midnight"] {
+  --frame: #1f2a44;
+  --bg: #0b1020;
+  --panel: #131b31;
+  --border: #1f2a44;
+  --text: #e1e7f5;
+  --muted: #8f9bb8;
+  --accent: #5b8cff;
+  --hover: #1a2440;
+  --up: #2fbfa7;
+  --down: #f46a67;
+}
+body[data-theme="graphite"] {
+  --frame: #353940;
+  --bg: #1c1e22;
+  --panel: #25282d;
+  --border: #353940;
+  --text: #dcdee2;
+  --muted: #959aa3;
+  --accent: #6b9bf2;
+  --hover: #30343a;
+  --up: #45b393;
+  --down: #ea726a;
+}
+body.light[data-theme="paper"] {
+  --bg: #efe8da;
+  --panel: #f7f2e7;
+  --frame: #dcd2bd;
+  --card: #f9f5ec;
+  --field: #fbf8f1;
+  --border: #cbbfa8;
+  --text: #241e14;
+  --muted: #564a37;
+  --accent: #8a4a12;
+  --hover: #e5dccb;
+  --up: #11695a;
+  --down: #b03328;
+}
+body.light input[type="text"], body.light input[type="password"], body.light input[type="search"],
+body.light textarea, body.light select, body.light select option { background: var(--field); }
+
+/* The page and the base controls. */
+html, body { height: 100%; }
+body {
+  --frame: #2a2e39; --card: var(--bg); --gap: 6px; --pad: 6px; --radius: 6px;
+  margin: 0; display: flex; flex-direction: column;
+  background: var(--frame); color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+button, select, input {
+  font: inherit; color: inherit; background: transparent;
+  border: 1px solid transparent; border-radius: 4px; padding: 4px 8px; cursor: pointer;
+}
+button:hover, select:hover { background: var(--hover); }
+button.active, button.toggle.on { color: var(--accent); background: var(--hover); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+select { border-color: var(--border); background: var(--panel); }
+select option { background: var(--panel); }
+input[type="text"], input[type="password"], input[type="search"] {
+  border-color: var(--border); background: var(--bg); cursor: text; }
+button.accent { border-color: var(--accent); color: var(--accent); }
+button.danger { color: var(--down); }
+a { color: var(--accent); }
+.muted { color: var(--muted); }
+.error { color: var(--down); min-height: 1.4em; margin: 8px 0 0; }
+.ok { color: var(--up); }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 12px; }
+
+/* An app's page: what is the app's own on the left (.app-main), its tray of icons on the right (#rail). */
+.app-page { display: flex; gap: var(--gap); padding: var(--pad); flex: 1; min-height: 0; box-sizing: border-box; }
+.app-main { flex: 1; min-width: 0; background: var(--card); border-radius: var(--radius); padding: 18px 22px;
+  overflow: auto; }
+.app-main h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+.app-main h2 { margin: 18px 0 6px; font-size: 15px; font-weight: 600; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px;
+  width: min(420px, 100%); box-sizing: border-box; }
+.card.center { margin: 48px auto; text-align: center; }
+.field { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; text-align: left; }
+.field label { color: var(--muted); font-size: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row.end { justify-content: flex-end; }
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0; }
+dl.facts dt { color: var(--muted); }
+dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+table.list { border-collapse: collapse; width: 100%; }
+table.list th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+table.list td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.list tr:hover td { background: var(--hover); }
+
+/* The rail: the app's master icon first, then its plugins' icons; an <hr> divides one app's tray
+   from the next bound app's (the user: "Each divider represents a separate tray"). */
+#rail { display: flex; flex-direction: column; gap: 2px; padding: var(--pad) 4px; align-self: flex-start; max-height: 100%;
+  background: var(--card); border-radius: var(--radius); flex: none; overflow-y: auto; }
+#rail button { position: relative; width: 46px; height: 46px; padding: 0; display: grid; place-items: center;
+  color: var(--muted); border-radius: 7px; }
+#rail button:hover { color: var(--text); }
+#rail button.active { background: var(--hover); color: var(--accent); }
+#rail button.active::before { content: ""; position: absolute; left: -4px; top: 10px; bottom: 10px; width: 2px;
+  border-radius: 1px; background: var(--accent); }
+#rail hr { width: 70%; border: 0; border-top: 1px solid var(--border); margin: 4px auto; }
+#rail button.master { color: var(--text); }
+#rail button.master.active { color: var(--accent); }
+.rail-badge { position: absolute; right: 2px; bottom: 2px; color: inherit; background: var(--panel);
+  border-radius: 50%; display: grid; place-items: center; }
+.rail-count { position: absolute; right: 2px; top: 2px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+  font-size: 11px; line-height: 18px; color: var(--panel); background: var(--muted); }
+#rail button.active .rail-count { color: #fff; background: var(--accent); }

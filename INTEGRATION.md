@@ -13,6 +13,7 @@ what changed.
 | `liminal-integrator` | `liminal_integrator` | `liminal-integrator` | The fetcher: a stack of requests, an assessment of the work over the plugins, the standing pass, the data API page, a service or daemon from your logon. |
 | `plugin-integrator-<name>` (fifteen) | `plugin_integrator_<name>` | – | The stock-data plugins of the integrator: feeds (Massive, Alpaca, Tiingo, the crypto venues, Cboe, TWSE, B3, Alpha Vantage, J-Quants, Twelve Data) and publishers (Federal, Ken French, Datahub). |
 | `plugin-platform-<name>` (three) | `plugin_platform_<name>` | – | The AI assistants of the platform: Claude, Grok, Codex, each on your own API key, evaluating standardized arguments. |
+| `liminal-login` | `liminal_login` | `liminal-login` | The login app: the users, each with a store of key-vector pairs (API keys, account names, passwords) encrypted from their password; its page at 8795 with the one user icon; what every other app and plugin asks for a key (`liminal_libs.apps.LoginClient`). |
 
 Coming with 0.3.0: `liminal-platform` (the machine's information, the AI plugins' host, the IPC nexus
 and the base class of the charts app), `liminal-login` (authorization), `liminal-plugins` (the
@@ -92,6 +93,21 @@ own plan information with its capability scan.
   and port; a key's machine-wide ledger is shared by key, whichever integrator spends it.
 - An AI evaluation runs in the caller's process over HTTPS and is recorded in the main file's
   `evaluations` table; nothing is sent from an offline copy.
+
+## The apps and their trays (liminal-libs 1.7.0)
+
+The user, 2026-11-04: every app (login, charts, platform, integrator, the plugins manager) has its
+own web server, its own icon and its own tray of icons on the right of its page; one master icon
+controls the app itself (charts: the symbol; integrator: the fetcher; platform: the plugins; login:
+the user) and every other icon is a view plugin of that app (`plugin-<app>-<name>`); the data and AI
+plugins sit inside their app's Plugins icon. A super app (the charts app) binds the others and draws
+their trays under its own, a divider between each; a bound app's views render left of the icons when
+one of its icons is picked; the integrator may run as a daemon on another port and still be bound in
+"seamlessly like it is local". The library holds the frame (`liminal_libs.apps`: `App`, `Tray`,
+`TrayItem`, the server every app runs, `web.py`), the common graphics (`liminal_libs.ui`: `icons.js`,
+`liminal.css`) and the clients of the apps (`LoginClient`); what is particular to one app stays in
+that app's repository. The binding of trays and the proxies over the hosts' pipe come with 0.3.0;
+today the charts front proxies the integrator's data API by hand.
 
 ## Keys and accounts
 
