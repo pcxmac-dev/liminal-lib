@@ -61,13 +61,15 @@ class MailSettings:
     dkim_domain: str = ""  # the sender's domain unless said
 
     @classmethod
-    def from_env(cls, env=None) -> "MailSettings":
+    def from_env(cls, env=None, cfg=None) -> "MailSettings":
         """The settings from `env`, or from the process's environment over the user's saved variables (the
         Windows registry's user Environment key, read now: `liminal-login mail setup` while the app runs
         counts), the password from the secret store (secrets.py: Windows' Credential Manager) when it is
-        in neither."""
+        in neither; `cfg`, a login's own settings (apps.scope: the file's [mail] section), between the saved
+        variables and the environment."""
         if env is None:
-            env = {**_saved(), **{k: v for k, v in os.environ.items() if k in ALL_VARS}}
+            env = {**_saved(), **{k: str(v) for k, v in (cfg or {}).items() if k in ALL_VARS},
+                   **{k: v for k, v in os.environ.items() if k in ALL_VARS}}
             if not env.get(PASSWORD_VAR):
                 secret = _secret(PASSWORD_VAR)
                 if secret:
@@ -87,6 +89,13 @@ class MailSettings:
         \"you can use a terminal to send email if to the correct port with right protocol\"): port 25 with
         STARTTLS, no account and no password; the message comes from `sender`, yours."""
         return self.host.strip().lower() == DIRECT
+
+    @property
+    def through_server(self) -> bool:
+        """Whether messages go through a mail server of the user's (an account at a host, or a server on
+        this machine), not straight to each address's own (the user, 2026-11-06: "only allow signup if the
+        login app is tied to an smtp server")."""
+        return self.configured and not self.direct
 
     @property
     def configured(self) -> bool:
@@ -123,7 +132,7 @@ class MailSettings:
         """What the page may know: the provider (or direct) and the sender, never the password."""
         return {"configured": self.configured, "host": self.host, "port": DIRECT_PORT if self.direct else self.port,
                 "security": self.security, "sender": parseaddr(self.sender)[1] or self.sender, "user": self.user,
-                "direct": self.direct, "dkim": self.dkim_record}
+                "direct": self.direct, "dkim": self.dkim_record, "throughServer": self.through_server}
 
     def problems(self) -> list[str]:
         out = []
@@ -167,8 +176,9 @@ class Mailer:
     """Sends through the account's server. `smtp` and `smtp_ssl` are the transports (smtplib's),
     replaceable by a test's stand-ins."""
 
-    def __init__(self, settings: MailSettings | None = None, log=None, smtp=None, smtp_ssl=None, resolve=None):
+    def __init__(self, settings: MailSettings | None = None, log=None, smtp=None, smtp_ssl=None, resolve=None, cfg=None):
         self._settings = settings
+        self._cfg = dict(cfg or {})  # a login's own settings (its cfg's [mail]), read with the environment
         self.log = log or (lambda m: None)
         self._smtp = smtp or smtplib.SMTP
         self._smtp_ssl = smtp_ssl or smtplib.SMTP_SSL
@@ -178,7 +188,7 @@ class Mailer:
     def settings(self) -> MailSettings:
         """The settings given, or the user's as they are now (the environment, the saved variables, the
         secret store), read each time: an account set up while the app runs is used at once."""
-        return self._settings if self._settings is not None else MailSettings.from_env()
+        return self._settings if self._settings is not None else MailSettings.from_env(cfg=self._cfg)
 
     @settings.setter
     def settings(self, value: MailSettings | None) -> None:
@@ -282,24 +292,36 @@ class Mailer:
         return sent
 
 
-def exchangers(domain: str) -> list[str]:
-    """The mail exchangers of `domain` by preference (its MX records, through the machine's own resolver:
-    nslookup, windowless), the domain itself when it has none (the implicit MX of RFC 5321); nothing for
-    what is not a domain."""
+DOMAIN_FORM = r"[a-z0-9-]+(\.[a-z0-9-]+)+"
+
+
+def mx_records(domain: str) -> list[str] | None:
+    """The mail exchangers in `domain`'s mail record (MX) by preference, through the machine's own resolver
+    (nslookup, windowless): [] when the domain has none, None when it is no domain or the lookup could
+    not run."""
     domain = domain.strip().strip(".").lower()
-    if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", domain):
-        return []
+    if not re.fullmatch(DOMAIN_FORM, domain):
+        return None
     try:
         out = subprocess.run(["nslookup", "-type=mx", domain], capture_output=True, text=True, timeout=15,
                              **_no_window()).stdout or ""
     except (OSError, subprocess.SubprocessError):
-        return [domain]
+        return None
     found = []
     for line in out.splitlines():  # Windows: "MX preference = 10, mail exchanger = h"; Linux: "mail exchanger = 10 h."
         m = re.search(r"MX preference = (\d+), mail exchanger = (\S+)", line) or re.search(r"mail exchanger = (\d+) (\S+)", line)
         if m:
             found.append((int(m.group(1)), m.group(2).rstrip(".").lower()))
-    return list(dict.fromkeys(h for _, h in sorted(found))) or [domain]
+    return list(dict.fromkeys(h for _, h in sorted(found)))
+
+
+def exchangers(domain: str) -> list[str]:
+    """Where to deliver for `domain`: its mail exchangers (mx_records), else the domain itself (the implicit
+    MX of RFC 5321); nothing for what is not a domain."""
+    domain = domain.strip().strip(".").lower()
+    if not re.fullmatch(DOMAIN_FORM, domain):
+        return []
+    return mx_records(domain) or [domain]
 
 
 def _context(host: str) -> ssl.SSLContext:

@@ -83,9 +83,9 @@ def test_the_settings_come_from_the_environment_and_say_what_is_missing():
     assert not s.configured and s.port == 587 and s.security == "starttls"
     assert any("LIMINAL_SMTP_HOST" in p for p in s.problems())
     s = MailSettings.from_env({**ENV, "LIMINAL_SMTP_PORT": "465", "LIMINAL_SMTP_SECURITY": "SSL"})
-    assert s.configured and s.port == 465 and s.security == "ssl" and s.sender == "Liminal <me@gmail.com>"
+    assert s.configured and s.port == 465 and s.security == "ssl" and s.sender == "Liminal <me@gmail.com>" and s.through_server
     assert s.describe() == {"configured": True, "host": "smtp.gmail.com", "port": 465, "security": "ssl",
-                            "sender": "me@gmail.com", "user": "me@gmail.com", "direct": False, "dkim": ""}
+                            "sender": "me@gmail.com", "user": "me@gmail.com", "direct": False, "dkim": "", "throughServer": True}
     assert "app-pw" not in repr(s) and "app-pw" not in str(s.describe())
     half = MailSettings.from_env({"LIMINAL_SMTP_HOST": "smtp.gmail.com", "LIMINAL_SMTP_USER": "me@gmail.com"})
     assert not half.configured and any("go together" in p for p in half.problems())
@@ -148,9 +148,9 @@ def test_direct_delivery_goes_to_the_recipients_own_exchangers_with_tls_and_no_a
     # LIMINAL_SMTP_HOST=direct, the sender yours; port 25 of the address's own exchangers, TLS, no password
     env = {"LIMINAL_SMTP_HOST": "direct", "LIMINAL_SMTP_FROM": "me@proton.me", "LIMINAL_SMTP_HELO": "neptune.example.test"}
     s = MailSettings.from_env(env)
-    assert s.direct and s.configured and s.problems() == [] and s.helo_name() == "neptune.example.test"
+    assert s.direct and s.configured and s.problems() == [] and s.helo_name() == "neptune.example.test" and not s.through_server
     assert s.describe() == {"configured": True, "host": "direct", "port": 25, "security": "starttls", "sender": "me@proton.me",
-                            "user": "", "direct": True, "dkim": ""}
+                            "user": "", "direct": True, "dkim": "", "throughServer": False}
     bare = MailSettings.from_env({"LIMINAL_SMTP_HOST": "direct"})
     assert not bare.configured and bare.problems() == ["LIMINAL_SMTP_FROM is not set (the address the message comes from: yours)"]
     assert "." in MailSettings().helo_name()  # a name with a dot, whatever the machine is called
@@ -195,9 +195,15 @@ def test_the_settings_are_read_from_the_environment_the_saved_variables_and_the_
     monkeypatch.setattr(mail, "_secret", lambda name: "bridge-pw-1" if name == "LIMINAL_SMTP_PASSWORD" else None)
     s = MailSettings.from_env()
     assert (s.host, s.port, s.user, s.password, s.sender) == ("127.0.0.1", 1025, "me@proton.me", "bridge-pw-1", "me@proton.me") and s.configured
+    # a login's own settings (its cfg) come between the saved variables and the environment
+    cfg = {"LIMINAL_SMTP_HOST": "smtp.cfg.test", "LIMINAL_SMTP_FROM": "login@cfg.test", "UNRELATED": "x"}
+    c = MailSettings.from_env(cfg=cfg)
+    assert (c.host, c.sender, c.user, c.password) == ("smtp.cfg.test", "login@cfg.test", "me@proton.me", "bridge-pw-1")
+    assert Mailer(smtp=FakeServer, cfg=cfg).settings.host == "smtp.cfg.test"
     monkeypatch.setenv("LIMINAL_SMTP_HOST", "smtp.gmail.com")
     monkeypatch.setenv("LIMINAL_SMTP_PASSWORD", "env-pw")
     assert (MailSettings.from_env().host, MailSettings.from_env().password) == ("smtp.gmail.com", "env-pw")
+    assert MailSettings.from_env(cfg=cfg).host == "smtp.gmail.com"  # the environment wins over the cfg
     m = Mailer(smtp=FakeServer)
     assert m.settings.host == "smtp.gmail.com" and m.configured
     monkeypatch.setenv("LIMINAL_SMTP_HOST", "127.0.0.1")
@@ -228,6 +234,7 @@ def test_the_exchangers_come_from_the_machines_own_resolver(monkeypatch):
         monkeypatch.setattr(mail.subprocess, "run", lambda args, _o=out, **kw: ran.append(args) or SimpleNamespace(stdout=_o))
         assert mail.exchangers("Proton.me.") == ["mail.protonmail.ch", "mailsec.protonmail.ch"]
     assert ran[0] == ["nslookup", "-type=mx", "proton.me"]
+    assert mail.mx_records("proton.me") == ["mail.protonmail.ch", "mailsec.protonmail.ch"]
     monkeypatch.setattr(mail.subprocess, "run", lambda args, **kw: SimpleNamespace(stdout="*** nowhere.test: Non-existent domain\n"))
-    assert mail.exchangers("nowhere.test") == ["nowhere.test"]  # the implicit MX: the domain itself
-    assert mail.exchangers("not a domain") == [] and mail.exchangers("") == []
+    assert mail.mx_records("nowhere.test") == [] and mail.exchangers("nowhere.test") == ["nowhere.test"]  # the implicit MX: the domain itself
+    assert mail.exchangers("not a domain") == [] and mail.exchangers("") == [] and mail.mx_records("not a domain") is None

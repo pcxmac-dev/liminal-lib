@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.16.0 (2026-11-06)
+
+What a login is tied to (the user: "have like a setup.cfg for the login, and then like other web apps
+use that cfg file to decide the domain/scope of the login"; "login apps tied to domains (with email
+server) or local (file://project/folder)"; "use a url regardless, file if local, domain w/ email server
+in mail record (lookup) or specified if none in the domain lookup"): `apps.scope.Scope`, read from
+`liminal-login.cfg` (`Scope.find`: LIMINAL_LOGIN_CFG, the workspace, the working folder or one above,
+the data folder's login/), whose [login] scope is a URL: `file:///...` a project folder (a local login:
+no email, no sign-up; its users in the folder's store/data/login or .liminal/login), `https://domain` the
+domain's users (their codes through the domain's own mail record, or the [mail] server named;
+`members` domain or any). `MailSettings.from_env(cfg=)` and `Mailer(cfg=)` take the file's [mail]
+between the saved variables and the environment; `MailSettings.through_server` (an account at a host, not
+direct: what a sign-up needs); `mail.mx_records(domain)` (the mail record alone, [] when none).
+
 ## 1.15.0 (2026-11-06)
 
 The app as the mail server of the user's own domain (the user: "it looks like i need a domain/email

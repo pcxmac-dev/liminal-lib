@@ -8,4 +8,5 @@ from .app import App, Refused, attach_registry, make_handler  # noqa: F401
 from .authorization import EnvironmentLogin, Login, Unauthorized, pair_name, variable_name  # noqa: F401
 from .binding import FORWARDED, PASSED_BACK, START_SECONDS, Binding, forward, start_app, tray_of, wait_for  # noqa: F401
 from .login import DEFAULT_URL, SESSION_HEADER, URL_VAR, LoginClient, LoginRefused, LoginUnreachable  # noqa: F401
+from .scope import CFG_VAR, FILE_NAME, Scope  # noqa: F401
 from .tray import Tray, TrayItem  # noqa: F401
