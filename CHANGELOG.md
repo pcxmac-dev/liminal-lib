@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.9.0 (2026-11-06)
+
+The apps bound together, `apps/binding.py` (the user: "objects that I can bind together, like the login
+app and the integrator app ... I can still link to an existing integrator and get its functions tied
+into the chart app ... seamlessly like it is local"): `Binding(name, url, module)` (reachable, its tray,
+the prefix a super app serves it under), `tray_of(url)`, `start_app(module, port, env)` (the app's
+`serve --no-browser --port N --until-quiet`, detached and windowless), `wait_for(port, seconds)`, and
+`forward(handler, method, url, path, cookie_path=...)`: a front passes a page's request on to the bound
+app and its answer back as it comes (an event stream chunk by chunk), the bound app's cookies with their
+path narrowed to the prefix. `App.serve(until_quiet=seconds)` ends the server once no request has come
+for that long (`App.touch`, every request). Tests: tests/test_binding.py.
+
 ## 1.8.0 (2026-11-06)
 
 Outgoing mail, `mail.py` (the user: "send an email out, to an email server with correct credentials so

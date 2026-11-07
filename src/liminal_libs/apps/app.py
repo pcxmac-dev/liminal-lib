@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,8 +51,13 @@ class App:
     def __init__(self, log=print):
         self.log = log
         self.served: str | None = None  # the URL once started
+        self.touched = time.monotonic()  # the last request (serve's until_quiet)
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    def touch(self) -> None:
+        """A page is in touch (every request): what `serve(until_quiet=...)` waits on."""
+        self.touched = time.monotonic()
 
     # -- what the app says about itself ----------------------------------------------------------
     def tray(self) -> Tray:
@@ -127,13 +133,19 @@ class App:
             self._thread.join(5)
             self._thread = None
 
-    def serve(self, port: int | None = None, open_browser: bool = False, stop: threading.Event | None = None) -> str:
-        """`start`, then wait until `stop` is set or Ctrl+C; the server ends; returns the URL served."""
+    def serve(self, port: int | None = None, open_browser: bool = False, stop: threading.Event | None = None,
+              until_quiet: float | None = None) -> str:
+        """`start`, then wait until `stop` is set, Ctrl+C, or (`until_quiet`, seconds) no request has
+        come for that long (an app started by another app's front for itself ends again on its own);
+        the server ends; returns the URL served."""
         url = self.start(port, open_browser)
         stop = stop or threading.Event()
+        self.touch()
         try:
             while not stop.wait(0.5):
-                pass
+                if until_quiet is not None and time.monotonic() - self.touched > until_quiet:
+                    self.log(f"{self.NAME}: no page has been in touch for {until_quiet:g} s: the server ends")
+                    break
         except KeyboardInterrupt:
             pass
         finally:
@@ -154,6 +166,7 @@ def make_handler(app: App):
             pass
 
         def do_GET(self) -> None:
+            app.touch()
             if not web.local_only(self):
                 return
             parts = urlsplit(self.path)
@@ -165,6 +178,7 @@ def make_handler(app: App):
             web.static_file(self, rel, app.static_dirs())
 
         def _write(self, method: str) -> None:
+            app.touch()
             if not web.local_only(self) or not web.from_this_app(self):
                 return
             if self.headers.get(web.WRITE_HEADER) != "1":
