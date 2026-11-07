@@ -182,13 +182,16 @@ class Settings:
         return (self.origin or self).plugins.get(name)
 
     @classmethod
-    def load(cls, env: Mapping[str, str] | None = None, env_file: Path | None = Path(".env")) -> "Settings":
+    def load(cls, env: Mapping[str, str] | None = None, env_file: Path | None = Path(".env"), login=None) -> "Settings":
         """The settings read: the `.env` file (`env_file`; None for none), then the user's saved
         variables (saved_user_keys: a process started before a key was saved still sees it), then the
         process's environment, which wins (or `env` in its place: nothing saved is read then); the
-        app's settings under their old names too (RENAMED). Every plugin's own settings are built from
-        the same variables (Settings.plugin); a plugin whose settings fail is left out and reported,
-        a value of yours it refuses (ConfigError) stops the app."""
+        app's settings under their old names too (RENAMED); then, with `login` (the app's
+        apps.authorization.Login: the signed-in user's pairs, named by the variables), the plugins'
+        variables the login furnishes, which win over all of it (the login is the root authorization).
+        Every plugin's own settings are built from the same variables (Settings.plugin); a plugin
+        whose settings fail is left out and reported, a value of yours it refuses (ConfigError) stops
+        the app."""
         merged: MutableMapping[str, str] = {}
         if env_file is not None:
             merged.update(read_env_file(env_file))
@@ -199,6 +202,10 @@ class Settings:
             if name not in merged and (old := renamed(merged, name)) is not None:
                 merged[name] = old
         from .sources.registry import assistants, leave_out, providers, publishers  # when called, not on import: the registry imports the plugins
+        from .sources.registry import variables as plugin_variables
+
+        if login is not None:
+            merged.update(login.variables(plugin_variables()))
 
         plugins = {}  # the plugins' own settings (API 1.11; 2.0: every kind's), by plugin
         for name, p in [*providers().items(), *publishers().items(), *assistants().items()]:
@@ -398,10 +405,12 @@ def _announce_environment() -> None:
 def load_settings(
     env: Mapping[str, str] | None = None,
     env_file: Path | None = Path(".env"),
+    login=None,
 ) -> Settings:
     """The settings read from the `.env` file, the user's saved variables and the process's
-    environment (or `env` in its place): Settings.load(env, env_file)."""
-    return Settings.load(env, env_file)
+    environment (or `env` in its place), and the app's login when given: Settings.load(env,
+    env_file, login)."""
+    return Settings.load(env, env_file, login)
 
 
 def with_detected(settings: Settings, plans: Mapping[str, str]) -> Settings:

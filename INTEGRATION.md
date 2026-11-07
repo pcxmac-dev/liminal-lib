@@ -124,6 +124,15 @@ for its key, nothing else; the plugin contract's `interface()` enumerates the ho
 plugin attached and its API and `ask(name, hook, ...)` calling across; the app offers its own surface the
 same way (`interface()`). In-process today; the proxy over the hosts' pipe comes with the resident plugins.
 
+Since 1.11.0 the pairs are named by the variables (the user, 2026-11-06: "By the variables"): the pair
+of `MASSIVE_API_KEY` is `massive-api-key` (`KeyVar.pair`, `apps.pair_name`, `apps.variable_name`), so a
+user keeps one key under one name in the login app, the Plugins view and the environment. An app reads
+its plugins' keys through its login: `load_settings(login=app.login)` lets the login's pairs win over the
+environment (`Login.variables`), and `apps.attach_registry(app)` attaches every plugin the registry loaded
+to the app with that login. The integrator's fetcher and the charts app hold an `EnvironmentLogin` until a
+daemon can hold a login session of its own; the login app lists the pairs the plugins ask for
+(`GET /api/pairs/known`) so a user adds a key under the name the plugin reads.
+
 ## Keys and accounts
 
 Keys live only in your user environment variables (the Windows registry's user `Environment` key;

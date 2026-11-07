@@ -144,3 +144,47 @@ def test_a_record_and_a_publisher_offer_their_hooks_the_same_way():
     pub = Agency()
     assert pub.interface()["hooks"] == {"moments": "(day)"} and pub.HOOKS[0] == "moments"
     assert pub.ask("moments", None) == ()
+
+
+def test_the_pairs_are_named_by_the_variables_and_a_login_fills_the_settings(monkeypatch):
+    from liminal_libs import config
+    from liminal_libs.apps import attach_registry, pair_name, variable_name
+    from liminal_libs.sources.keys import KeyVar
+
+    assert pair_name("MASSIVE_API_KEY") == "massive-api-key" and pair_name("ALPACA_API_KEY_ID") == "alpaca-api-key-id"
+    assert variable_name("massive-api-key") == "MASSIVE_API_KEY" and KeyVar("TIINGO_API_KEY").pair == "tiingo-api-key"
+    # a login furnishes the variables it has pairs for, listing them once when it can
+    login = FakeLogin({"massive-api-key": "k1", "acme-api-key": "k2"})
+    assert login.variables(["MASSIVE_API_KEY", "ACME_API_KEY", "TIINGO_API_KEY"]) == {"MASSIVE_API_KEY": "k1", "ACME_API_KEY": "k2"}
+    assert FakeLogin(name=None).variables(["MASSIVE_API_KEY"]) == {} and login.variables([]) == {}
+
+    class Listing(FakeLogin):
+        asked: list = []
+
+        def names(self):
+            return set(self.pairs)
+
+        def vector(self, name):
+            self.asked.append(name)
+            return super().vector(name)
+    listing = Listing({"massive-api-key": "k1"})
+    assert listing.variables(["MASSIVE_API_KEY", "TIINGO_API_KEY"]) == {"MASSIVE_API_KEY": "k1"} and listing.asked == ["massive-api-key"]
+    env_login = EnvironmentLogin(env={"MASSIVE_API_KEY": "e", "EMPTY": ""})
+    assert env_login.names() == {"massive-api-key"} and env_login.variables(["MASSIVE_API_KEY", "EMPTY"]) == {"MASSIVE_API_KEY": "e"}
+    # the settings: the login's pairs win over the environment (the root authorization); without a login, as before
+    monkeypatch.setattr(config, "saved_user_keys", lambda: {})
+    plain = config.load_settings(env={"MASSIVE_API_KEY": "env-k"}, env_file=None)
+    signed = config.load_settings(env={"MASSIVE_API_KEY": "env-k"}, env_file=None, login=FakeLogin({"massive-api-key": "login-k"}))
+    assert plain.env.get("MASSIVE_API_KEY") == "env-k" and signed.env.get("MASSIVE_API_KEY") == "login-k"
+    assert config.load_settings(env={}, env_file=None, login=FakeLogin(name=None)).env.get("MASSIVE_API_KEY") is None
+    # every plugin the registry loaded, attached to an app (none twice, none another app's)
+    app = DemoApp(log=lambda m: None, login=login)
+    other = DemoApp(log=lambda m: None)
+    names = attach_registry(app, only="integrator")
+    from liminal_libs.sources.registry import providers
+
+    assert all(providers()[n].app is app and providers()[n].login is login for n in names if n in providers())
+    assert attach_registry(other, only="integrator") == []  # held by `app` already
+    assert set(app.plugins()) == set(names)
+    for n in names:
+        app.detach(n)

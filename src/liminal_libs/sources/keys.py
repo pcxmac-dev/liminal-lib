@@ -41,6 +41,13 @@ class KeyVar:
     def names(self) -> tuple[str, ...]:
         return (self.name, *self.aliases)
 
+    @property
+    def pair(self) -> str:
+        """Its name in the login's store (the user, 2026-11-06: "By the variables"): massive-api-key."""
+        from ..apps.authorization import pair_name  # when asked (keys.py is imported early)
+
+        return pair_name(self.name)
+
     def value(self, env: Mapping[str, str]) -> str | None:
         return next((env[n] for n in self.names if env.get(n)), None)
 

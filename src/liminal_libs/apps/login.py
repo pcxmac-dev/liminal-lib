@@ -121,6 +121,13 @@ class LoginClient(Login):
         """The user's pairs by name, kind and label, never their values."""
         return self._call("GET", "/api/pairs").get("pairs", [])
 
+    def names(self) -> set[str] | None:
+        """The pairs the signed-in user has (one call), or None when not signed in or unreachable."""
+        try:
+            return {p["name"] for p in self.pairs()}
+        except Unauthorized:
+            return None
+
     def vector(self, name: str) -> str:
         """The value of the pair `name` (the key, the account name, the password: what only the
         login app can furnish)."""

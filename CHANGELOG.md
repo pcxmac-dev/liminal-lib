@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.11.0 (2026-11-06)
+
+The pairs are named by the variables (the user: "By the variables"): a plugin's key variable
+`MASSIVE_API_KEY` is the login app's pair `massive-api-key`, `ALPACA_API_KEY_ID` is `alpaca-api-key-id`
+(`apps.pair_name`, `apps.variable_name`, `KeyVar.pair`), so the login app's pairs, the user environment
+variables and the Plugins view name the same thing.
+
+- `Login.names()` (the pairs there are, when a realization can list them; `LoginClient` and
+  `EnvironmentLogin` do) and `Login.variables(wanted)`: the variables among `wanted` the login furnishes
+  from its pairs, nothing asked twice; a login not signed in furnishes none.
+- `Settings.load(env, env_file, login=None)` and `load_settings(login=)`: with the app's `Login`, the
+  plugins' variables it furnishes win over the `.env` file, the saved variables and the environment
+  (the login is the root authorization); without one, as before.
+- `apps.attach_registry(app, only=None)`: every plugin the registry loaded attached to `app` with the
+  app's login (one system with `only`; a plugin another app holds is left alone), the names attached
+  returned.
+- `EnvironmentLogin.vector(name)` reads the variable of the pair's name (`massive-api-key` ->
+  `MASSIVE_API_KEY`), or the `pairs` mapping given; `names()` lists the pairs of the variables set.
+
 ## 1.10.0 (2026-11-06)
 
 The authorization interface and the plugins' IPC surface (the user: "the app plugins need to use the

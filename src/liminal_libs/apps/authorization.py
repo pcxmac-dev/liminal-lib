@@ -27,6 +27,17 @@ class Unauthorized(Exception):
         self.reason, self.status = reason, status
 
 
+def pair_name(variable: str) -> str:
+    """A plugin's key variable as the login's store names its pair (the user, 2026-11-06: "By the
+    variables"): MASSIVE_API_KEY is `massive-api-key`, ALPACA_API_KEY_ID `alpaca-api-key-id`."""
+    return str(variable or "").strip().lower().replace("_", "-")
+
+
+def variable_name(pair: str) -> str:
+    """The variable a pair fills: `massive-api-key` is MASSIVE_API_KEY."""
+    return str(pair or "").strip().upper().replace("-", "_")
+
+
 class Login(ABC):
     """What a plugin or an app may ask of the login of its app's namespace. `vector` and `user` are
     the realization's; `key`, `account` and `password` name the pairs by their convention
@@ -65,6 +76,30 @@ class Login(ABC):
         policy for the login's realm to refine; everything the user has, by default."""
         return self.signed_in
 
+    def names(self) -> set[str] | None:
+        """The pairs the signed-in user has, by name, when the realization can list them (one call
+        instead of one per variable); None when it cannot."""
+        return None
+
+    def variables(self, wanted) -> dict[str, str]:
+        """The variables among `wanted` (a plugin's key names: MASSIVE_API_KEY ...) this login
+        furnishes, with their values: what Settings.load merges over the environment when an app has
+        a login. Nobody signed in: nothing."""
+        wanted = list(wanted)
+        if not wanted or not self.signed_in:
+            return {}
+        have = self.names()
+        out: dict[str, str] = {}
+        for variable in wanted:
+            pair = pair_name(variable)
+            if have is not None and pair not in have:
+                continue
+            try:
+                out[variable] = self.vector(pair)
+            except Unauthorized:
+                continue
+        return out
+
     @property
     def signed_in(self) -> bool:
         try:
@@ -93,9 +128,13 @@ class EnvironmentLogin(Login):
     def user(self) -> dict:
         return {"name": getpass.getuser(), "email": None, "verified": False}
 
+    def names(self) -> set[str]:
+        env = os.environ if self.env is None else self.env
+        return {pair_name(v) for v, value in env.items() if value} | {p for p, v in self.pairs.items() if env.get(v)}
+
     def vector(self, name: str) -> str:
         env = os.environ if self.env is None else self.env
-        variable = self.pairs.get(name) or name.upper().replace("-", "_").replace(".", "_")
+        variable = self.pairs.get(name) or variable_name(name).replace(".", "_")
         value = env.get(variable)
         if not value:
             raise Unauthorized(f"no {name} here ({variable} is not set)", 404)
