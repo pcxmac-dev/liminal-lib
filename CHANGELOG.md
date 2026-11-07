@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.15.0 (2026-11-06)
+
+The app as the mail server of the user's own domain (the user: "it looks like i need a domain/email
+server for this to work"): `dkim.py` signs what the mailer sends for the domain (RFC 6376, RSA-SHA256,
+relaxed/relaxed; From, To, Subject, Date, Message-ID), given a key (`generate_key`, kept by the login app)
+and one DNS record at the domain (`dns_record`: `<selector>._domainkey.<domain> TXT v=DKIM1; k=rsa; p=...`;
+`published` reads it back through the machine's resolver); `verify` does what the receiving server does.
+`LIMINAL_SMTP_DKIM_KEY` (the private key's file), `LIMINAL_SMTP_DKIM_SELECTOR`, `LIMINAL_SMTP_DKIM_DOMAIN`
+(the sender's domain unless said); `MailSettings.signing`, `signing_domain`, `dkim_record`, `describe()['dkim']`;
+`Sent.signed`. With it a message from an address at the domain passes DMARC wherever it lands, home
+connection or not; a receiver may still want a reverse name for the address.
+
 ## 1.14.0 (2026-11-06)
 
 A mail account kept safely, used at once (the user: "is there a way to add something secure to the python

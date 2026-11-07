@@ -46,6 +46,7 @@ class FakeServer:
         return 250, b"2.1.5 OK"
 
     def data(self, msg):
+        self.data = msg if isinstance(msg, (bytes, bytearray)) else msg.encode()
         m = message_from_bytes(msg) if isinstance(msg, (bytes, bytearray)) else message_from_string(msg)
         self.calls.append(("data", m["From"], m["To"], m["Subject"], m.get_payload(), m["Message-ID"], m["Date"]))
         return 250, b"2.0.0 OK  1699 - gsmtp"
@@ -84,7 +85,7 @@ def test_the_settings_come_from_the_environment_and_say_what_is_missing():
     s = MailSettings.from_env({**ENV, "LIMINAL_SMTP_PORT": "465", "LIMINAL_SMTP_SECURITY": "SSL"})
     assert s.configured and s.port == 465 and s.security == "ssl" and s.sender == "Liminal <me@gmail.com>"
     assert s.describe() == {"configured": True, "host": "smtp.gmail.com", "port": 465, "security": "ssl",
-                            "sender": "me@gmail.com", "user": "me@gmail.com", "direct": False}
+                            "sender": "me@gmail.com", "user": "me@gmail.com", "direct": False, "dkim": ""}
     assert "app-pw" not in repr(s) and "app-pw" not in str(s.describe())
     half = MailSettings.from_env({"LIMINAL_SMTP_HOST": "smtp.gmail.com", "LIMINAL_SMTP_USER": "me@gmail.com"})
     assert not half.configured and any("go together" in p for p in half.problems())
@@ -109,7 +110,7 @@ def test_a_message_goes_through_the_account_with_starttls_and_the_log_names_no_s
     assert (sent.to, sent.host, sent.port, sent.code, sent.reply) == ("ada@example.test", "smtp.gmail.com", 587, 250, "2.0.0 OK 1699 - gsmtp")
     assert sent.message_id == calls[7][5] and sent.at.startswith("20") and str(sent) == "smtp.gmail.com:587 answered 250 2.0.0 OK 1699 - gsmtp"
     assert sent.as_dict() == {"to": "a***@example.test", "host": "smtp.gmail.com", "port": 587, "code": 250, "reply": "2.0.0 OK 1699 - gsmtp",
-                              "at": sent.at, "messageId": sent.message_id}
+                              "at": sent.at, "messageId": sent.message_id, "signed": ""}
     assert lines == ["login: a message went to a***@example.test through smtp.gmail.com (Your passkey): the server answered 250 2.0.0 OK 1699 - gsmtp"]
     # SSL from the start, and no login for a bridge on this machine
     FakeServer.made = []
@@ -149,7 +150,7 @@ def test_direct_delivery_goes_to_the_recipients_own_exchangers_with_tls_and_no_a
     s = MailSettings.from_env(env)
     assert s.direct and s.configured and s.problems() == [] and s.helo_name() == "neptune.example.test"
     assert s.describe() == {"configured": True, "host": "direct", "port": 25, "security": "starttls", "sender": "me@proton.me",
-                            "user": "", "direct": True}
+                            "user": "", "direct": True, "dkim": ""}
     bare = MailSettings.from_env({"LIMINAL_SMTP_HOST": "direct"})
     assert not bare.configured and bare.problems() == ["LIMINAL_SMTP_FROM is not set (the address the message comes from: yours)"]
     assert "." in MailSettings().helo_name()  # a name with a dot, whatever the machine is called

@@ -24,6 +24,7 @@ import smtplib
 import socket
 import ssl
 import subprocess
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -36,7 +37,8 @@ SECURITIES = ("starttls", "ssl", "none")
 HELO_VAR = "LIMINAL_SMTP_HELO"  # what this machine calls itself to a mail server (the local domain, yours to scope)
 DIRECT = "direct"  # LIMINAL_SMTP_HOST=direct: straight to each recipient's own mail exchangers, no account
 DIRECT_PORT = 25
-ALL_VARS = (*VARS, HELO_VAR)
+DKIM_KEY_VAR, DKIM_SELECTOR_VAR, DKIM_DOMAIN_VAR = "LIMINAL_SMTP_DKIM_KEY", "LIMINAL_SMTP_DKIM_SELECTOR", "LIMINAL_SMTP_DKIM_DOMAIN"
+ALL_VARS = (*VARS, HELO_VAR, DKIM_KEY_VAR, DKIM_SELECTOR_VAR, DKIM_DOMAIN_VAR)
 LOOPBACK = ("127.0.0.1", "localhost", "::1")  # a server on this machine: Proton Bridge
 TIMEOUT_S = 30
 
@@ -54,6 +56,9 @@ class MailSettings:
     password: str = field(default="", repr=False)
     sender: str = ""
     helo: str = ""
+    dkim_key: str = ""  # the private key's file (dkim.py): the message signed for the user's domain
+    dkim_selector: str = ""
+    dkim_domain: str = ""  # the sender's domain unless said
 
     @classmethod
     def from_env(cls, env=None) -> "MailSettings":
@@ -72,7 +77,9 @@ class MailSettings:
         return cls(host=(env.get(HOST_VAR) or "").strip(), port=int(raw_port) if raw_port.isdecimal() else 587,
                    security=security if security in SECURITIES else "starttls",
                    user=(env.get(USER_VAR) or "").strip(), password=env.get(PASSWORD_VAR) or "",
-                   sender=(env.get(FROM_VAR) or env.get(USER_VAR) or "").strip(), helo=(env.get(HELO_VAR) or "").strip())
+                   sender=(env.get(FROM_VAR) or env.get(USER_VAR) or "").strip(), helo=(env.get(HELO_VAR) or "").strip(),
+                   dkim_key=(env.get(DKIM_KEY_VAR) or "").strip(), dkim_selector=(env.get(DKIM_SELECTOR_VAR) or "").strip().lower(),
+                   dkim_domain=(env.get(DKIM_DOMAIN_VAR) or "").strip().lower())
 
     @property
     def direct(self) -> bool:
@@ -89,6 +96,21 @@ class MailSettings:
             return bool(self.sender)
         return bool(self.host and self.sender and (bool(self.user) == bool(self.password)))
 
+    @property
+    def signing(self) -> bool:
+        """Whether messages are signed for the user's domain (a key file and a selector set)."""
+        return bool(self.dkim_key and self.dkim_selector)
+
+    @property
+    def signing_domain(self) -> str:
+        """The domain signed for: LIMINAL_SMTP_DKIM_DOMAIN, else the sender's."""
+        return self.dkim_domain or parseaddr(self.sender)[1].rpartition("@")[2].lower()
+
+    @property
+    def dkim_record(self) -> str:
+        """The DNS name of the signing key's record (`<selector>._domainkey.<domain>`), or ""."""
+        return f"{self.dkim_selector}._domainkey.{self.signing_domain}" if self.signing else ""
+
     def helo_name(self) -> str:
         """What this machine calls itself to a mail server: LIMINAL_SMTP_HELO, else its full name when it
         has one, else liminal.local (a mail exchanger wants a name with a dot in it)."""
@@ -101,7 +123,7 @@ class MailSettings:
         """What the page may know: the provider (or direct) and the sender, never the password."""
         return {"configured": self.configured, "host": self.host, "port": DIRECT_PORT if self.direct else self.port,
                 "security": self.security, "sender": parseaddr(self.sender)[1] or self.sender, "user": self.user,
-                "direct": self.direct}
+                "direct": self.direct, "dkim": self.dkim_record}
 
     def problems(self) -> list[str]:
         out = []
@@ -130,11 +152,12 @@ class Sent:
     reply: str
     at: str
     message_id: str
+    signed: str = ""  # the DKIM record the message is signed under, when it is
 
     def as_dict(self) -> dict:
         """For a page or a client: the address masked."""
         return {"to": _mask(self.to), "host": self.host, "port": self.port, "code": self.code, "reply": self.reply,
-                "at": self.at, "messageId": self.message_id}
+                "at": self.at, "messageId": self.message_id, "signed": self.signed}
 
     def __str__(self) -> str:
         return f"{self.host}:{self.port} answered {self.code} {self.reply}".rstrip()
@@ -173,6 +196,15 @@ class Mailer:
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = make_msgid(domain=parseaddr(self.settings.sender)[1].rpartition("@")[2] or "liminal.local")
         msg.set_content(text)
+        s = self.settings
+        if s.signing:  # signed for the user's domain (dkim.py): the DNS record at the domain proves it
+            from . import dkim
+
+            try:
+                pem = Path(s.dkim_key).read_bytes()
+            except OSError as e:
+                raise MailError(f"the DKIM key file cannot be read ({s.dkim_key}: {e}); `liminal-login mail dkim init` makes one") from None
+            msg["DKIM-Signature"] = dkim.sign(msg.as_bytes(), s.signing_domain, s.dkim_selector, pem)
         return msg
 
     def send(self, to: str, subject: str, text: str) -> "Sent":
@@ -243,8 +275,10 @@ class Mailer:
                             "Gmail wants an app password, Proton an SMTP token or the Bridge's password") from None
         except (smtplib.SMTPException, OSError) as e:
             raise MailError(f"the mail server at {host}:{port} did not take the message: {_scrub(e, s.password)}") from None
-        sent = Sent(to, host, port, code, reply, datetime.now(timezone.utc).isoformat(timespec="seconds"), msg["Message-ID"])
-        self.log(f"login: a message went to {_mask(to)} through {host} ({subject}): the server answered {code} {reply}")
+        sent = Sent(to, host, port, code, reply, datetime.now(timezone.utc).isoformat(timespec="seconds"), msg["Message-ID"],
+                    s.dkim_record)
+        self.log(f"login: a message went to {_mask(to)} through {host} ({subject}): the server answered {code} {reply}"
+                 + (f"; signed under {s.dkim_record}" if s.signing else ""))
         return sent
 
 
