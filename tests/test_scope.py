@@ -31,13 +31,25 @@ def test_a_domain_login_is_the_domains_users_with_its_own_mail_record_unless_a_s
     s = Scope.for_domain("Hypokrites.me.")
     assert s.kind == "domain" and s.url == "https://hypokrites.me" and s.domain == "hypokrites.me" and s.name == "hypokrites.me" and s.label == "@hypokrites.me"
     assert s.members == "domain" and s.root is None and s.data_dir(tmp_path) == tmp_path  # the app adds the domain's folder
-    assert s.mail_variables() == {"LIMINAL_SMTP_HOST": "direct", "LIMINAL_SMTP_FROM": "login@hypokrites.me"}
+    assert s.mail_variables() == {"LIMINAL_SMTP_HOST": "direct", "LIMINAL_SMTP_FROM": "Liminal <admin@hypokrites.me>"}
+    assert s.admin_address == "admin@hypokrites.me" and s.admin_host == "hypokrites.me" and s.imap_variables() == {}
     assert s.describe()["mailServer"] == "the domain's own mail record"
     named = Scope.parse("[login]\nscope = hypokrites.me\nmembers = any\n\n[mail]\nhost = 127.0.0.1\nport = 1025\nuser = me@hypokrites.me\nfrom = Liminal <login@hypokrites.me>\n")
     assert named.url == "https://hypokrites.me" and named.members == "any" and named.describe()["mailServer"] == "127.0.0.1"
     assert named.mail_variables() == {"LIMINAL_SMTP_HOST": "127.0.0.1", "LIMINAL_SMTP_PORT": "1025", "LIMINAL_SMTP_USER": "me@hypokrites.me",
                                       "LIMINAL_SMTP_FROM": "Liminal <login@hypokrites.me>"}
     assert "members = any" in named.text() and "host = 127.0.0.1" in named.text() and "password" in named.text()
+    # the login's own account: admin@ a host under the domain, valid in DNS; the admin mailbox for the checks
+    own = Scope.parse("[login]\nscope = https://hypokrites.me\nadmin = Admin@liminal.hypokrites.me\n\n[imap]\nhost = mail.liminal.hypokrites.me\nport = 993\n")
+    assert own.admin_address == "admin@liminal.hypokrites.me" and own.admin_host == "liminal.hypokrites.me"
+    assert own.mail_variables()["LIMINAL_SMTP_FROM"] == "Liminal <admin@liminal.hypokrites.me>"
+    assert own.imap_variables() == {"LIMINAL_IMAP_HOST": "mail.liminal.hypokrites.me", "LIMINAL_IMAP_PORT": "993", "LIMINAL_IMAP_USER": "admin@liminal.hypokrites.me"}
+    assert own.describe()["admin"] == "admin@liminal.hypokrites.me" and own.describe()["mailbox"] == "mail.liminal.hypokrites.me"
+    back = Scope.parse(own.text())
+    assert back.admin == "admin@liminal.hypokrites.me" and back.imap["host"] == "mail.liminal.hypokrites.me" and "[imap]" in own.text()
+    with pytest.raises(ValueError):
+        Scope.parse("[login]\nscope = https://hypokrites.me\nadmin = admin@elsewhere.test\n")
+    assert Scope.local(tmp_path).admin_address == "" and Scope.local(tmp_path).admin_host == ""
     with pytest.raises(ValueError):
         Scope.parse("[login]\nscope = https://hypokrites.me\nmembers = some\n")
     with pytest.raises(ValueError):

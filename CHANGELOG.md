@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.17.0 (2026-11-06)
+
+A domain's login has an account of its own, and the pieces to check its mail server with it (the user:
+"the login-app would need it's own admin account ie. admin@liminal.domain.tld it would need to be valid in
+the DNS record ... and the admin account could be used to test the server so that it can send and
+receive with the user email and also see if emails can be sent to other servers, without error"):
+`Scope.admin` ([login] admin = admin@<a host under the domain>; `admin_address`, `admin_host`; the codes
+come from it unless [mail] from says otherwise), `Scope.imap` ([imap]: the admin mailbox; `imap_variables`);
+`dns.py` (`addresses`, `mx_records`, `txt_records`, `spf_record`: what the machine's resolver says, now);
+`mailbox.py` (`MailboxSettings` from LIMINAL_IMAP_*, a file's [imap] and the secret store; `Mailbox.find`:
+whether a message with a subject is in the admin inbox, over IMAP). `mail.mx_records` reads through dns.py.
+
 ## 1.16.0 (2026-11-06)
 
 What a login is tied to (the user: "have like a setup.cfg for the login, and then like other web apps

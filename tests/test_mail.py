@@ -230,11 +230,13 @@ def test_the_exchangers_come_from_the_machines_own_resolver(monkeypatch):
     linux = ("Server:\t\t127.0.0.53\nAddress:\t127.0.0.53#53\n\nNon-authoritative answer:\n"
              "proton.me\tmail exchanger = 10 mail.protonmail.ch.\nproton.me\tmail exchanger = 20 mailsec.protonmail.ch.\n")
     ran: list = []
+    from liminal_libs import dns
+
     for out in (windows, linux):
-        monkeypatch.setattr(mail.subprocess, "run", lambda args, _o=out, **kw: ran.append(args) or SimpleNamespace(stdout=_o))
+        monkeypatch.setattr(dns.subprocess, "run", lambda args, _o=out, **kw: ran.append(args) or SimpleNamespace(stdout=_o))
         assert mail.exchangers("Proton.me.") == ["mail.protonmail.ch", "mailsec.protonmail.ch"]
     assert ran[0] == ["nslookup", "-type=mx", "proton.me"]
     assert mail.mx_records("proton.me") == ["mail.protonmail.ch", "mailsec.protonmail.ch"]
-    monkeypatch.setattr(mail.subprocess, "run", lambda args, **kw: SimpleNamespace(stdout="*** nowhere.test: Non-existent domain\n"))
+    monkeypatch.setattr(dns.subprocess, "run", lambda args, **kw: SimpleNamespace(stdout="*** nowhere.test: Non-existent domain\n"))
     assert mail.mx_records("nowhere.test") == [] and mail.exchangers("nowhere.test") == ["nowhere.test"]  # the implicit MX: the domain itself
     assert mail.exchangers("not a domain") == [] and mail.exchangers("") == [] and mail.mx_records("not a domain") is None

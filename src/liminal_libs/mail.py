@@ -296,23 +296,11 @@ DOMAIN_FORM = r"[a-z0-9-]+(\.[a-z0-9-]+)+"
 
 
 def mx_records(domain: str) -> list[str] | None:
-    """The mail exchangers in `domain`'s mail record (MX) by preference, through the machine's own resolver
-    (nslookup, windowless): [] when the domain has none, None when it is no domain or the lookup could
-    not run."""
-    domain = domain.strip().strip(".").lower()
-    if not re.fullmatch(DOMAIN_FORM, domain):
-        return None
-    try:
-        out = subprocess.run(["nslookup", "-type=mx", domain], capture_output=True, text=True, timeout=15,
-                             **_no_window()).stdout or ""
-    except (OSError, subprocess.SubprocessError):
-        return None
-    found = []
-    for line in out.splitlines():  # Windows: "MX preference = 10, mail exchanger = h"; Linux: "mail exchanger = 10 h."
-        m = re.search(r"MX preference = (\d+), mail exchanger = (\S+)", line) or re.search(r"mail exchanger = (\d+) (\S+)", line)
-        if m:
-            found.append((int(m.group(1)), m.group(2).rstrip(".").lower()))
-    return list(dict.fromkeys(h for _, h in sorted(found)))
+    """The mail exchangers in `domain`'s mail record (MX) by preference (dns.mx_records): [] when the domain
+    has none, None when it is no domain or the lookup could not run."""
+    from . import dns
+
+    return dns.mx_records(domain)
 
 
 def exchangers(domain: str) -> list[str]:

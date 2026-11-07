@@ -23,6 +23,7 @@ from .. import layout
 FILE_NAME = "liminal-login.cfg"
 CFG_VAR = "LIMINAL_LOGIN_CFG"
 MAIL_KEYS = ("host", "port", "security", "user", "from", "helo", "dkim_key", "dkim_selector", "dkim_domain")
+IMAP_KEYS = ("host", "port", "security", "user")  # the admin mailbox, read for the checks
 MEMBERS = ("domain", "any")
 _DOMAIN = r"[a-z0-9-]+(\.[a-z0-9-]+)+"
 
@@ -36,6 +37,8 @@ class Scope:
     members: str = "domain"  # a domain's login: "domain" (addresses at the domain only) or "any"
     data: Path | None = None  # where the users' folders live; None: by the kind (data_dir)
     mail: dict = field(default_factory=dict)  # the [mail] section: host, port, security, user, from, helo, dkim_*
+    imap: dict = field(default_factory=dict)  # the [imap] section: the admin mailbox (host, port, security, user)
+    admin: str = ""  # a domain's login's own account, admin@<a host under the domain> (the user, 2026-11-06)
     path: Path | None = None  # the file read, when one was
 
     @property
@@ -56,6 +59,18 @@ class Scope:
         if self.kind != "domain":
             return ""
         return (urlparse(self.url).hostname or "").lower().strip(".")
+
+    @property
+    def admin_address(self) -> str:
+        """The login's own account: `admin`, else admin@<domain> for a domain's login, "" for a local one."""
+        if self.kind != "domain":
+            return ""
+        return self.admin.strip().lower() or f"admin@{self.domain}"
+
+    @property
+    def admin_host(self) -> str:
+        """The host of the admin address (liminal.domain.tld, say): what must be valid in DNS."""
+        return self.admin_address.rpartition("@")[2]
 
     @property
     def name(self) -> str:
@@ -86,7 +101,15 @@ class Scope:
         out = {f"LIMINAL_SMTP_{k.upper()}": str(v).strip() for k, v in self.mail.items() if k in MAIL_KEYS and str(v).strip()}
         if self.kind == "domain":
             out.setdefault("LIMINAL_SMTP_HOST", "direct")
-            out.setdefault("LIMINAL_SMTP_FROM", f"login@{self.domain}")
+            out.setdefault("LIMINAL_SMTP_FROM", f"Liminal <{self.admin_address}>")
+        return out
+
+    def imap_variables(self) -> dict[str, str]:
+        """The [imap] section as the mailbox reader's variables (LIMINAL_IMAP_*); the user is the admin
+        address unless said."""
+        out = {f"LIMINAL_IMAP_{k.upper()}": str(v).strip() for k, v in self.imap.items() if k in IMAP_KEYS and str(v).strip()}
+        if out.get("LIMINAL_IMAP_HOST") and self.kind == "domain":
+            out.setdefault("LIMINAL_IMAP_USER", self.admin_address)
         return out
 
     def describe(self) -> dict:
@@ -94,6 +117,7 @@ class Scope:
                 "serves": list(self.serves), "members": self.members if self.kind == "domain" else "local",
                 "root": str(self.root) if self.root is not None else None, "domain": self.domain,
                 "mailServer": (self.mail.get("host") or "the domain's own mail record") if self.kind == "domain" else "",
+                "admin": self.admin_address, "adminHost": self.admin_host, "mailbox": self.imap.get("host", ""),
                 "path": str(self.path) if self.path is not None else None}
 
     @classmethod
@@ -124,10 +148,16 @@ class Scope:
         if members not in MEMBERS:
             raise ValueError(f"{where}: members is domain or any, not {members!r}")
         mail = {k.strip().lower(): v.strip() for k, v in cfg["mail"].items()} if "mail" in cfg else {}
+        imap = {k.strip().lower(): v.strip() for k, v in cfg["imap"].items()} if "imap" in cfg else {}
         scope = cls(url, title=login.get("title", "").strip(), serves=serves, port=int(port) if port.isdecimal() else None,
-                    members=members, data=Path(data).expanduser() if data else None, mail=mail, path=Path(path) if path else None)
+                    members=members, data=Path(data).expanduser() if data else None, mail=mail, imap=imap,
+                    admin=login.get("admin", "").strip().lower(), path=Path(path) if path else None)
         if scope.kind == "domain" and not scope.domain:
             raise ValueError(f"{where}: the scope names no domain: {url}")
+        if scope.kind == "domain":
+            host = scope.admin_host
+            if "@" not in scope.admin_address or not (host == scope.domain or host.endswith("." + scope.domain)):
+                raise ValueError(f"{where}: admin is an address at the domain or a host under it (admin@liminal.{scope.domain}), not {scope.admin!r}")
         return scope
 
     @classmethod
@@ -167,6 +197,8 @@ class Scope:
         if self.kind == "domain":
             lines.append("; members: domain (addresses at the domain only) or any (everyone)")
             lines.append(f"members = {self.members}")
+            lines.append("; the login's own account, at the domain or a host under it that is valid in DNS; the codes come from it")
+            lines.append(f"admin = {self.admin_address}")
         if self.data is not None:
             lines.append(f"data = {self.data}")
         lines += ["", "[mail]"]
@@ -178,6 +210,12 @@ class Scope:
             v = self.mail.get(k, "")
             lines.append(f"{k} = {v}" if v else f"; {k} =")
         lines.append("; the password: `liminal-login mail setup` keeps it in Windows Credential Manager, never here")
+        if self.kind == "domain":
+            lines += ["", "[imap]", "; the admin mailbox, read by `liminal-login mail check` to see its own test message arrive"]
+            for k in IMAP_KEYS:
+                v = self.imap.get(k, "")
+                lines.append(f"{k} = {v}" if v else f"; {k} =")
+            lines.append("; its password: `liminal-login mail setup` keeps it in Windows Credential Manager too")
         return "\n".join(lines) + "\n"
 
     def write(self, path: Path) -> Path:
