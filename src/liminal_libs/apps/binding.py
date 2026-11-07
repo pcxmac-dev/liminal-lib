@@ -104,11 +104,13 @@ def wait_for(port: int, seconds: float = START_SECONDS, step: float = 0.25) -> b
 
 
 def forward(handler, method: str, url: str, path: str, *, cookie_path: str | None = None,
+            drop_cookies: tuple[str, ...] = (),
             unavailable: str = "the app does not answer; ask again shortly") -> None:
     """The request passed on to the bound app at `url` as `path` (its body read here, within
     MAX_BODY), its answer passed back as it comes (an event stream chunk by chunk), its cookies too
-    (their path narrowed to `cookie_path`, the prefix the super app serves the bound app under, so a
-    bound app's cookie stays its own)."""
+    (their path narrowed to `cookie_path` when given: the prefix the super app serves the bound app
+    under). `drop_cookies`: the names (by prefix) of the browser's cookies that are not this app's
+    business and stay here (the login app's session, kept from the integrator)."""
     raw_length = handler.headers.get("Content-Length") or "0"
     length = int(raw_length) if raw_length.isdecimal() else -1
     if length < 0:
@@ -118,6 +120,13 @@ def forward(handler, method: str, url: str, path: str, *, cookie_path: str | Non
     body = handler.rfile.read(length) if length else None
     target = urlsplit(url)
     headers = {name: value for name in FORWARDED if (value := handler.headers.get(name)) is not None}
+    if drop_cookies and headers.get("Cookie"):
+        kept = [c.strip() for c in headers["Cookie"].split(";")
+                if c.strip() and not c.strip().partition("=")[0].startswith(drop_cookies)]
+        if kept:
+            headers["Cookie"] = "; ".join(kept)
+        else:
+            del headers["Cookie"]
     headers["Host"] = target.netloc
     conn = http.client.HTTPConnection(target.hostname, target.port, timeout=None)
     try:

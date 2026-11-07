@@ -61,7 +61,8 @@ def _front(url: str):
                 return
             if not self.path.startswith("/demo/"):
                 return web.send(self, 404, b"not found", "text/plain")
-            forward(self, method, url, self.path[len("/demo"):], cookie_path="/demo", unavailable="demo is away")
+            forward(self, method, url, self.path[len("/demo"):], cookie_path="/demo", drop_cookies=("other_",),
+                    unavailable="demo is away")
 
         def do_GET(self):
             self._go("GET")
@@ -87,10 +88,12 @@ def test_a_front_passes_its_pages_requests_on_and_the_answers_and_cookies_back()
     threading.Thread(target=front.serve_forever, daemon=True).start()
     port = front.server_address[1]
     try:
-        status, body, r = _get(port, "/demo/api/echo?x=1", {"Cookie": "liminal_login=tok", "Origin": f"http://127.0.0.1:{port}",
+        status, body, r = _get(port, "/demo/api/echo?x=1", {"Cookie": "other_app=1; liminal_login=tok; other_two=2",
+                                                           "Origin": f"http://127.0.0.1:{port}",
                                                            "Sec-Fetch-Site": "same-origin", "X-Liminal-Session": "tok"})
         j = json.loads(body)
         assert status == 200 and j["path"] == "/api/echo?x=1" and j["cookie"] == "liminal_login=tok" and j["session"] == "tok"
+        assert json.loads(_get(port, "/demo/api/echo", {"Cookie": "other_app=1"})[1])["cookie"] is None  # none left: no header
         assert j["origin"] is None and j["host"] == url.split("//", 1)[1]  # where it came from stays here
         assert r.getheader("Set-Cookie") == "liminal_login=tok; Path=/demo; HttpOnly; SameSite=Strict"  # the cookie's path narrowed
         assert _get(port, "/demo/api/echo", {"Origin": "http://evil.example"})[0] == 403

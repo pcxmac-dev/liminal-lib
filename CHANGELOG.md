@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.1 (2026-11-06)
+
+`forward(..., drop_cookies=(prefixes,))`: the browser's cookies that are not the bound app's business stay
+with the front (the charts front keeps the login app's session from the integrator). The bound app's
+own cookies keep their path unless `cookie_path` says otherwise, so the main page's request carries
+the login's session and the front can ask who is signed in.
+
 ## 1.9.0 (2026-11-06)
 
 The apps bound together, `apps/binding.py` (the user: "objects that I can bind together, like the login
