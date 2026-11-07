@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.13.0 (2026-11-06)
+
+Direct delivery, no mail account (the user: "i am pretty sure you can use a terminal to send email if to
+the correct port with right protocol"; Proton's exchangers took a message from this machine on port 25):
+`LIMINAL_SMTP_HOST=direct` with `LIMINAL_SMTP_FROM` (your address) sends each message straight to the
+recipient's own mail exchangers (`mail.exchangers(domain)`: the MX records through the machine's resolver,
+by preference, the domain itself when it has none), port 25, STARTTLS when offered (a code never goes in the
+clear unless `LIMINAL_SMTP_SECURITY=none`), the next exchanger when one is not reached. The machine calls
+itself `LIMINAL_SMTP_HELO`, else its full name, else `liminal.local` (`MailSettings.helo_name`);
+`MailSettings.direct`; `describe()` says `direct`; `Mailer(resolve=)` for a test's stand-in.
+
 ## 1.12.0 (2026-11-06)
 
 `Mailer.send` returns the mail server's word that it took the message (the user: "i will need a way to
