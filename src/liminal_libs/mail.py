@@ -36,6 +36,8 @@ SECURITIES = ("starttls", "ssl", "none")
 HELO_VAR = "LIMINAL_SMTP_HELO"  # what this machine calls itself to a mail server (the local domain, yours to scope)
 DIRECT = "direct"  # LIMINAL_SMTP_HOST=direct: straight to each recipient's own mail exchangers, no account
 DIRECT_PORT = 25
+ALL_VARS = (*VARS, HELO_VAR)
+LOOPBACK = ("127.0.0.1", "localhost", "::1")  # a server on this machine: Proton Bridge
 TIMEOUT_S = 30
 
 
@@ -55,7 +57,16 @@ class MailSettings:
 
     @classmethod
     def from_env(cls, env=None) -> "MailSettings":
-        env = os.environ if env is None else env
+        """The settings from `env`, or from the process's environment over the user's saved variables (the
+        Windows registry's user Environment key, read now: `liminal-login mail setup` while the app runs
+        counts), the password from the secret store (secrets.py: Windows' Credential Manager) when it is
+        in neither."""
+        if env is None:
+            env = {**_saved(), **{k: v for k, v in os.environ.items() if k in ALL_VARS}}
+            if not env.get(PASSWORD_VAR):
+                secret = _secret(PASSWORD_VAR)
+                if secret:
+                    env[PASSWORD_VAR] = secret
         raw_port = (env.get(PORT_VAR) or "").strip()
         security = (env.get(SECURITY_VAR) or "starttls").strip().lower()
         return cls(host=(env.get(HOST_VAR) or "").strip(), port=int(raw_port) if raw_port.isdecimal() else 587,
@@ -97,8 +108,8 @@ class MailSettings:
         if self.direct:
             return [] if self.sender else [f"{FROM_VAR} is not set (the address the message comes from: yours)"]
         if not self.host:
-            out.append(f"{HOST_VAR} is not set (direct: straight to each address's own mail server; "
-                       "or smtp.gmail.com, smtp.protonmail.ch, 127.0.0.1 for Proton Bridge)")
+            out.append(f"{HOST_VAR} is not set (127.0.0.1 for Proton Bridge on this machine, smtp.gmail.com, "
+                       "smtp.protonmail.ch; direct: straight to each address's own mail server; `liminal-login mail setup`)")
         if not self.sender:
             out.append(f"{FROM_VAR} or {USER_VAR} is not set (the address the message comes from)")
         if bool(self.user) != bool(self.password):
@@ -134,11 +145,21 @@ class Mailer:
     replaceable by a test's stand-ins."""
 
     def __init__(self, settings: MailSettings | None = None, log=None, smtp=None, smtp_ssl=None, resolve=None):
-        self.settings = settings or MailSettings.from_env()
+        self._settings = settings
         self.log = log or (lambda m: None)
         self._smtp = smtp or smtplib.SMTP
         self._smtp_ssl = smtp_ssl or smtplib.SMTP_SSL
         self._resolve = resolve or exchangers  # a domain's mail exchangers (direct delivery)
+
+    @property
+    def settings(self) -> MailSettings:
+        """The settings given, or the user's as they are now (the environment, the saved variables, the
+        secret store), read each time: an account set up while the app runs is used at once."""
+        return self._settings if self._settings is not None else MailSettings.from_env()
+
+    @settings.setter
+    def settings(self, value: MailSettings | None) -> None:
+        self._settings = value
 
     @property
     def configured(self) -> bool:
@@ -165,7 +186,7 @@ class Mailer:
         msg = self.message(to, subject, text)
         sender = parseaddr(s.sender)[1] or s.sender
         recipient = parseaddr(to)[1]
-        context = ssl.create_default_context()
+        context = _context("" if s.direct else s.host)
         helo = s.helo_name()
         if s.direct:  # the recipient's own exchangers by preference, the first reached takes it
             hosts, port = self._resolve(recipient.rpartition("@")[2]), DIRECT_PORT
@@ -245,6 +266,36 @@ def exchangers(domain: str) -> list[str]:
         if m:
             found.append((int(m.group(1)), m.group(2).rstrip(".").lower()))
     return list(dict.fromkeys(h for _, h in sorted(found))) or [domain]
+
+
+def _context(host: str) -> ssl.SSLContext:
+    """TLS to the server, verified; not for a server on this machine (Proton Bridge's own certificate is
+    self-signed, and the connection never leaves the machine)."""
+    context = ssl.create_default_context()
+    if host.strip().lower() in LOOPBACK:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _saved() -> dict[str, str]:
+    """The mail variables among the user's saved ones (Windows; {} elsewhere)."""
+    try:
+        from .config import UserEnvironment
+
+        return UserEnvironment(names=ALL_VARS).saved()
+    except Exception:  # noqa: BLE001 - nothing saved to read
+        return {}
+
+
+def _secret(name: str) -> str | None:
+    """A secret from the machine's store (secrets.py), None without one."""
+    try:
+        from . import secrets
+
+        return secrets.get(name)
+    except Exception:  # noqa: BLE001 - no store, or one that cannot be read: not set
+        return None
 
 
 def _no_window() -> dict:

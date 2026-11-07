@@ -21,6 +21,7 @@ class FakeServer:
 
     def __init__(self, host, port, timeout=None, context=None, local_hostname=None):
         self.calls: list = [("connect", host, port, timeout, context is not None, local_hostname)]
+        self.context = context
         self.made.append(self)
 
     def ehlo(self):
@@ -30,6 +31,7 @@ class FakeServer:
         return name.lower() in self.extensions
 
     def starttls(self, context=None):
+        self.context = context
         self.calls.append(("starttls", context is not None))
 
     def login(self, user, password):
@@ -181,6 +183,37 @@ def test_direct_delivery_goes_to_the_recipients_own_exchangers_with_tls_and_no_a
     with pytest.raises(MailError) as e:
         Mailer(s, smtp=FakeServer, resolve=lambda d: []).send("ada@example.test", "s", "t")
     assert str(e.value) == "no mail server is known for a***@example.test"
+
+
+def test_the_settings_are_read_from_the_environment_the_saved_variables_and_the_secret_store(monkeypatch):
+    # `liminal-login mail setup` saves the account as user variables and the password in the secret store:
+    # a mailer built without settings sees them at once, the process's own environment winning
+    for v in mail.ALL_VARS:
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr(mail, "_saved", lambda: {"LIMINAL_SMTP_HOST": "127.0.0.1", "LIMINAL_SMTP_PORT": "1025", "LIMINAL_SMTP_USER": "me@proton.me"})
+    monkeypatch.setattr(mail, "_secret", lambda name: "bridge-pw-1" if name == "LIMINAL_SMTP_PASSWORD" else None)
+    s = MailSettings.from_env()
+    assert (s.host, s.port, s.user, s.password, s.sender) == ("127.0.0.1", 1025, "me@proton.me", "bridge-pw-1", "me@proton.me") and s.configured
+    monkeypatch.setenv("LIMINAL_SMTP_HOST", "smtp.gmail.com")
+    monkeypatch.setenv("LIMINAL_SMTP_PASSWORD", "env-pw")
+    assert (MailSettings.from_env().host, MailSettings.from_env().password) == ("smtp.gmail.com", "env-pw")
+    m = Mailer(smtp=FakeServer)
+    assert m.settings.host == "smtp.gmail.com" and m.configured
+    monkeypatch.setenv("LIMINAL_SMTP_HOST", "127.0.0.1")
+    assert m.settings.host == "127.0.0.1"  # read anew
+    FakeServer.made = []
+    assert m.send("ada@example.test", "s", "t").host == "127.0.0.1"
+    server = FakeServer.made[0]
+    assert server.calls[0][1:3] == ("127.0.0.1", 1025) and ("starttls", True) in server.calls
+    assert server.context.check_hostname is False  # the Bridge's own certificate, on this machine
+    FakeServer.made = []
+    Mailer(MailSettings.from_env(ENV), smtp=FakeServer).send("ada@example.test", "s", "t")
+    assert FakeServer.made[0].context.check_hostname is True  # elsewhere: verified
+    given = Mailer(MailSettings.from_env(ENV), smtp=FakeServer)
+    monkeypatch.setenv("LIMINAL_SMTP_HOST", "elsewhere.test")
+    assert given.settings.host == "smtp.gmail.com"  # settings given stay as given
+    given.settings = None
+    assert given.settings.host == "elsewhere.test"
 
 
 def test_the_exchangers_come_from_the_machines_own_resolver(monkeypatch):

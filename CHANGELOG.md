@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.14.0 (2026-11-06)
+
+A mail account kept safely, used at once (the user: "is there a way to add something secure to the python
+env?"; "so it looks like i need a domain/email server"): `secrets.py` keeps a secret of the user's in
+Windows' Credential Manager under `liminal:<VARIABLE>` (`get`, `put`, `remove`; a stand-in backend
+elsewhere). `MailSettings.from_env()` reads the process's environment over the user's saved variables and
+takes the password from the secret store when it is in neither, and a `Mailer` built without settings reads
+them anew each time, so `liminal-login mail setup` counts for a login app already running. TLS to a mail
+server on this machine (Proton Bridge at 127.0.0.1) goes without its self-signed certificate verified.
+
 ## 1.13.0 (2026-11-06)
 
 Direct delivery, no mail account (the user: "i am pretty sure you can use a terminal to send email if to
