@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.0 (2026-11-06)
+
+Outgoing mail, `mail.py` (the user: "send an email out, to an email server with correct credentials so
+that its not blocked, like proton or gmail"; "this operation can be part lib, and part login app"):
+`MailSettings.from_env()` reads one SMTP account of the user's from LIMINAL_SMTP_HOST, _PORT (587),
+_SECURITY (starttls, ssl, none), _USER, _PASSWORD and _FROM (Gmail with an app password, Proton Business
+with an SMTP token, or Proton Bridge on the machine with no login); `Mailer.send(to, subject, text)` sends
+through it (`MailError` names what went wrong without the password; the log names the address masked);
+`mask(address)`. The reserved names (`sources/keys.APP`) take the SMTP and login variables, so no plugin
+claims them. Tests: tests/test_mail.py, on stand-in servers.
+
 ## 1.7.0 (2026-11-05)
 
 The apps' frame (the user, 2026-11-04: "define all this stuff in liminal libs ... the library basically

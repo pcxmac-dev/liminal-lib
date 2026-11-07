@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "liminal-libs"
-version = "1.7.0"  # the library's own release (CHANGELOG.md)
+version = "1.8.0"  # the library's own release (CHANGELOG.md)
 description = "The Liminal library: the stores, the plugin contract, the collector and the scheme every Liminal program builds on (the chart app, the integrator, the plugins)."
 readme = "README.md"
 requires-python = ">=3.10"
