@@ -172,6 +172,9 @@ def test_the_pairs_are_named_by_the_variables_and_a_login_fills_the_settings(mon
     env_login = EnvironmentLogin(env={"MASSIVE_API_KEY": "e", "EMPTY": ""})
     assert env_login.names() == {"massive-api-key"} and env_login.variables(["MASSIVE_API_KEY", "EMPTY"]) == {"MASSIVE_API_KEY": "e"}
     # the settings: the login's pairs win over the environment (the root authorization); without a login, as before
+    from liminal_libs.sources import registry
+
+    monkeypatch.setattr(registry, "variables", lambda: ("MASSIVE_API_KEY",))  # a plugin reads it, installed or not (CI has no plugins)
     monkeypatch.setattr(config, "saved_user_keys", lambda: {})
     plain = config.load_settings(env={"MASSIVE_API_KEY": "env-k"}, env_file=None)
     signed = config.load_settings(env={"MASSIVE_API_KEY": "env-k"}, env_file=None, login=FakeLogin({"massive-api-key": "login-k"}))
