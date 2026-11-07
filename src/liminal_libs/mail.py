@@ -22,8 +22,9 @@ import os
 import smtplib
 import ssl
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from email.message import EmailMessage
-from email.utils import parseaddr
+from email.utils import formatdate, make_msgid, parseaddr
 
 HOST_VAR, PORT_VAR, SECURITY_VAR = "LIMINAL_SMTP_HOST", "LIMINAL_SMTP_PORT", "LIMINAL_SMTP_SECURITY"
 USER_VAR, PASSWORD_VAR, FROM_VAR = "LIMINAL_SMTP_USER", "LIMINAL_SMTP_PASSWORD", "LIMINAL_SMTP_FROM"
@@ -76,6 +77,29 @@ class MailSettings:
         return out
 
 
+@dataclass(frozen=True)
+class Sent:
+    """The mail server's word that it took a message (the user, 2026-11-06: "a way to check the server
+    response to see if it received the email"): its reply to the message's data, with the code (250: queued
+    for delivery; what happens after is the server's), when, and the message id to find it by."""
+
+    to: str
+    host: str
+    port: int
+    code: int
+    reply: str
+    at: str
+    message_id: str
+
+    def as_dict(self) -> dict:
+        """For a page or a client: the address masked."""
+        return {"to": _mask(self.to), "host": self.host, "port": self.port, "code": self.code, "reply": self.reply,
+                "at": self.at, "messageId": self.message_id}
+
+    def __str__(self) -> str:
+        return f"{self.host}:{self.port} answered {self.code} {self.reply}".rstrip()
+
+
 class Mailer:
     """Sends through the account's server. `smtp` and `smtp_ssl` are the transports (smtplib's),
     replaceable by a test's stand-ins."""
@@ -95,17 +119,21 @@ class Mailer:
         msg["From"] = self.settings.sender
         msg["To"] = to
         msg["Subject"] = subject
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain=parseaddr(self.settings.sender)[1].rpartition("@")[2] or "liminal.local")
         msg.set_content(text)
         return msg
 
-    def send(self, to: str, subject: str, text: str) -> None:
-        """One message to `to`; MailError when the account is not set up or the server refuses."""
+    def send(self, to: str, subject: str, text: str) -> "Sent":
+        """One message to `to`: the server's word that it took it (Sent); MailError when the account is
+        not set up, the server is not reached or it refuses the sender, the address or the message."""
         s = self.settings
         if not s.configured:
             raise MailError("email sending is not set up: " + "; ".join(s.problems()))
         if not parseaddr(to)[1] or "@" not in parseaddr(to)[1]:
             raise MailError("the address to send to is not an email address")
         msg = self.message(to, subject, text)
+        sender = parseaddr(s.sender)[1] or s.sender
         context = ssl.create_default_context()
         try:
             if s.security == "ssl":
@@ -119,18 +147,37 @@ class Mailer:
                     server.ehlo()
                 if s.user:
                     server.login(s.user, s.password)
-                server.send_message(msg)
+                # The envelope step by step, so the server's answer to the message itself is kept (the user,
+                # 2026-11-06: "check the server response to see if it received the email"): 250 to the data is
+                # its word that the message is queued for delivery; anything else is a refusal.
+                code, reply = _reply(*server.mail(sender))
+                if code != 250:
+                    raise MailError(f"the mail server at {s.host}:{s.port} refused the sender {sender}: {code} {reply}")
+                code, reply = _reply(*server.rcpt(parseaddr(to)[1]))
+                if code not in (250, 251):
+                    raise MailError(f"the mail server at {s.host}:{s.port} refused the address {_mask(to)}: {code} {reply}")
+                code, reply = _reply(*server.data(msg.as_bytes()))
+                if code != 250:
+                    raise MailError(f"the mail server at {s.host}:{s.port} did not take the message: {code} {reply}")
             finally:
                 try:
                     server.quit()
-                except Exception:  # noqa: BLE001 - the message went; a quit refused is nothing
+                except Exception:  # noqa: BLE001 - the answer is in hand; a quit refused is nothing
                     pass
         except smtplib.SMTPAuthenticationError as e:
             raise MailError(f"the mail server refused the credentials ({s.host}: {_scrub(e, s.password)}); "
                             "Gmail wants an app password, Proton an SMTP token or the Bridge's password") from None
         except (smtplib.SMTPException, OSError) as e:
             raise MailError(f"the mail server at {s.host}:{s.port} did not take the message: {_scrub(e, s.password)}") from None
-        self.log(f"login: a message went to {_mask(to)} through {s.host} ({subject})")
+        sent = Sent(to, s.host, s.port, code, reply, datetime.now(timezone.utc).isoformat(timespec="seconds"), msg["Message-ID"])
+        self.log(f"login: a message went to {_mask(to)} through {s.host} ({subject}): the server answered {code} {reply}")
+        return sent
+
+
+def _reply(code, text) -> tuple[int, str]:
+    """An SMTP reply as (code, its words): smtplib gives the words as bytes, sometimes over lines."""
+    words = text.decode("utf-8", "replace") if isinstance(text, (bytes, bytearray)) else str(text)
+    return int(code), " ".join(words.split())
 
 
 def _scrub(e: BaseException, *secrets: str) -> str:

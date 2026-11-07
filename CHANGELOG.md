@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.0 (2026-11-06)
+
+`Mailer.send` returns the mail server's word that it took the message (the user: "i will need a way to
+check the server response to see if it received the email and only if it did, does it wait for the
+response"): `mail.Sent` (the address, the server, its reply to the message's data with the code, when,
+the message id). The envelope goes step by step (MAIL, RCPT, DATA) so a refusal of the sender, the
+address or the message is a `MailError` in the server's own words, and the log line carries the reply.
+Every message gets a Message-ID (the sender's domain) and a Date.
+
 ## 1.11.0 (2026-11-06)
 
 The pairs are named by the variables (the user: "By the variables"): a plugin's key variable
