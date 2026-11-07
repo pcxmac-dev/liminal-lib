@@ -22,34 +22,39 @@ import urllib.parse
 import urllib.request
 
 from ..web import WRITE_HEADER
+from .authorization import Login, Unauthorized
 
 URL_VAR = "LIMINAL_LOGIN_URL"
 DEFAULT_URL = "http://127.0.0.1:8795"
 SESSION_HEADER = "X-Liminal-Session"  # the session a client got at sign-in, on every request after
 
 
-class LoginRefused(Exception):
+class LoginRefused(Unauthorized):
     """The login app refused: not signed in, a wrong name or password, no such pair, a name it
     does not take (its status, 401/403/404/400, and reason)."""
 
     def __init__(self, status: int, reason: str):
-        super().__init__(reason)
-        self.status, self.reason = status, reason
+        super().__init__(reason, status)
 
 
-class LoginUnreachable(Exception):
-    """No login app answers at the URL."""
+class LoginUnreachable(Unauthorized):
+    """No login app answers at the URL (nothing can be furnished: a refusal, status 503)."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason, 503)
 
 
-class LoginClient:
-    """A client of the login app: `sign_in` keeps the session token; `key`, `account`, `password`
-    and `vector` ask for the signed-in user's pairs; `put` and `remove` change them. A program made
-    by another (a plugin's host, a worker) is given the token (`token=`), never the password."""
+class LoginClient(Login):
+    """The authorization interface (`Login`) realized over HTTP to the login app of a namespace:
+    `sign_in` keeps the session token; `user`, `key`, `account`, `password` and `vector` ask for the
+    signed-in user's pairs; `put` and `remove` change them. A program made by another (a plugin's
+    host, a worker) is given the token (`token=`), never the password."""
 
-    def __init__(self, url: str | None = None, token: str | None = None, timeout: float = 10.0):
+    def __init__(self, url: str | None = None, token: str | None = None, timeout: float = 10.0, namespace: str = ""):
         self.url = (url or os.environ.get(URL_VAR) or DEFAULT_URL).rstrip("/")
         self.token = token
         self.timeout = timeout
+        self.NAMESPACE = namespace  # learnt from the login app's status when not given (`describe`)
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never through a proxy
 
     def _call(self, method: str, path: str, body: dict | None = None) -> dict:
@@ -82,7 +87,18 @@ class LoginClient:
 
     def status(self) -> dict:
         """Whether the login app has users yet and whether this session is signed in (`GET /api/status`)."""
-        return self._call("GET", "/api/status")
+        st = self._call("GET", "/api/status")
+        if st.get("for") and not self.NAMESPACE:
+            self.NAMESPACE = st["for"]
+        return st
+
+    def describe(self) -> dict:
+        try:
+            st = self.status()
+        except Unauthorized:
+            return {"namespace": self.NAMESPACE, "signedIn": False, "kind": type(self).__name__, "url": self.url, "reachable": False}
+        return {"namespace": st.get("for", self.NAMESPACE), "signedIn": bool(st.get("signedIn")), "kind": type(self).__name__,
+                "url": self.url, "reachable": True}
 
     def sign_in(self, name: str, password: str) -> dict:
         """Sign in as `name`; the session token is kept for the calls after. Returns the user."""

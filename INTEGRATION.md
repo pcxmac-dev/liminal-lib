@@ -109,6 +109,21 @@ one of its icons is picked; the integrator may run as a daemon on another port a
 that app's repository. The binding of trays and the proxies over the hosts' pipe come with 0.3.0;
 today the charts front proxies the integrator's data API by hand.
 
+## Authorization and IPC (liminal-libs 1.10.0)
+
+The user, 2026-11-06: the login instance of an app furnishes that app's plugins their keys and passwords;
+"the app plugins need to use the Abstract Base Class login as the only way to present an interface for
+IPC, between plugins and login and the app as far as AUTHORIZATION"; "the plugins use an ABC plugin to
+communicate IPC between themselves and the APP for functionality"; "the app itself (either chart or
+integrator) has plugin ABC as well"; "the plugin ABC will enumerate attached plugins and their API".
+So: `liminal_libs.apps.Login` is the one authorization interface (realized by `LoginClient` over HTTP to
+the login app of the app's namespace, by `EnvironmentLogin` for the transition, by a test's stand-in);
+a plugin attached by its app (`App.attach`) holds the app and its login and asks `self.login.key(self.name)`
+for its key, nothing else; the plugin contract's `interface()` enumerates the hooks a plugin answers
+(`Plugin.HOOKS` by kind) and `ask(hook, ...)` calls one by name, the app's `plugins()` enumerating every
+plugin attached and its API and `ask(name, hook, ...)` calling across; the app offers its own surface the
+same way (`interface()`). In-process today; the proxy over the hosts' pipe comes with the resident plugins.
+
 ## Keys and accounts
 
 Keys live only in your user environment variables (the Windows registry's user `Environment` key;

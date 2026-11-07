@@ -80,6 +80,7 @@ class PublisherPlugin(IntegratorPlugin):
 
     CONTRACT = True
     KIND = "publisher"
+    HOOKS = ("moments", "calendar", "read", "scan", "settings")
 
     feeds: tuple[Feed, ...] = ()
     policy: Policy = Policy()

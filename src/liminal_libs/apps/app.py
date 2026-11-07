@@ -12,6 +12,7 @@ front (liminal_charts.gui.front) and the integrator's page do the same by hand t
 this frame at 0.3.0, when a super app composes the trays of the apps it is bound to."""
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -48,12 +49,58 @@ class App:
     INDEX = "index.html"
     API = "1.0"  # the app's own API version, for its clients
 
-    def __init__(self, log=print):
+    def __init__(self, log=print, login=None):
         self.log = log
+        self.login = login  # the authorization interface of this app's namespace (apps.authorization.Login)
         self.served: str | None = None  # the URL once started
         self.touched = time.monotonic()  # the last request (serve's until_quiet)
+        self._plugins: dict[str, object] = {}  # the plugins attached, by name (attach)
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    # -- the plugins attached (the user, 2026-11-06: "the app itself (either chart or integrator) has
+    # plugin ABC as well"; "the plugin ABC will enumerate attached plugins and their API") ------------
+    def attach(self, plugin) -> dict:
+        """A plugin attached to this app: it gets this app and its login (the one way to its keys);
+        returns the interface the plugin offers (what `plugins` enumerates)."""
+        interface = plugin.attach(self, self.login)
+        self._plugins[plugin.name] = plugin
+        self.log(f"{self.NAME}: {plugin.name} attached ({plugin.KIND}; hooks {', '.join(interface['hooks']) or 'none'})")
+        return interface
+
+    def detach(self, name: str) -> bool:
+        plugin = self._plugins.pop(name, None)
+        if plugin is None:
+            return False
+        plugin.detach()
+        self.log(f"{self.NAME}: {name} detached")
+        return True
+
+    def plugin(self, name: str):
+        return self._plugins.get(name)
+
+    def plugins(self) -> dict[str, dict]:
+        """The plugins attached and their API, by name (`GET /api/plugins`)."""
+        return {name: p.interface() for name, p in self._plugins.items()}
+
+    def ask(self, name: str, hook: str, *args, **kwargs):
+        """One attached plugin's hook called by name (LookupError: no such plugin or hook)."""
+        plugin = self._plugins.get(name)
+        if plugin is None:
+            raise LookupError(f"no plugin {name!r} is attached to {self.NAME}")
+        return plugin.ask(hook, *args, **kwargs)
+
+    def interface(self) -> dict:
+        """What this app offers (the same shape a plugin gives of itself: `GET /api/interface`): its
+        name and API version, the methods a plugin or another app may call on it."""
+        methods = {}
+        for name in ("describe", "tray", "plugins", "attach", "detach", "ask", "interface"):
+            try:
+                methods[name] = str(inspect.signature(getattr(self, name)))
+            except (TypeError, ValueError):
+                methods[name] = "(...)"
+        return {"name": self.NAME, "kind": "app", "api": self.API, "login": self.login.describe() if self.login is not None else None,
+                "plugins": sorted(self._plugins), "methods": methods}
 
     def touch(self) -> None:
         """A page is in touch (every request): what `serve(until_quiet=...)` waits on."""
@@ -100,6 +147,10 @@ class App:
             return 200, self.tray().as_dict()
         if method == "GET" and path == "/api/app":
             return 200, self.describe()
+        if method == "GET" and path == "/api/plugins":
+            return 200, {"plugins": self.plugins()}
+        if method == "GET" and path == "/api/interface":
+            return 200, self.interface()
         raise Refused(HTTPStatus.NOT_FOUND, "not found")
 
     # -- the server ------------------------------------------------------------------------------

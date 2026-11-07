@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.10.0 (2026-11-06)
+
+The authorization interface and the plugins' IPC surface (the user: "the app plugins need to use the
+Abstract Base Class login as the only way to present an interface for IPC, between plugins and login
+and the app as far as AUTHORIZATION"; "the plugins use an ABC plugin to communicate IPC between
+themselves and the APP for functionality"; "the app itself (either chart or integrator) has plugin ABC
+as well"; "the plugin ABC will enumerate attached plugins and their API").
+
+- `apps/authorization.py`: `Login`, the abstract base every plugin and app holds a realization of
+  (`user`, `vector`; `key(plugin)`, `account`, `password` by the pairs' names; `has`, `may`, `signed_in`,
+  `describe`); `Unauthorized`; `EnvironmentLogin` reading the user environment variables (the keys'
+  store until every plugin is attached through an app). `LoginClient` realizes `Login` over HTTP to the
+  login app of a namespace (`LoginRefused` and `LoginUnreachable` are `Unauthorized`).
+- The plugin contract: `Plugin.HOOKS` by kind (feed, publisher, assistant), `Plugin.login` and `Plugin.app`
+  set by `attach(app, login)` (a record too), `interface()` (its name, kind, system, versions and the hooks
+  it answers itself with their signatures), `ask(hook, ...)` (a hook by name; across the pipe once the
+  plugin is resident), `detach()`.
+- `App.login`, `App.attach(plugin)`, `detach`, `plugin`, `plugins()` (the plugins attached and their API),
+  `ask(name, hook, ...)`, `interface()` (the app's own surface, the same shape); `GET /api/plugins`,
+  `GET /api/interface`. Tests: tests/test_authorization.py.
+
 ## 1.9.1 (2026-11-06)
 
 `forward(..., drop_cookies=(prefixes,))`: the browser's cookies that are not the bound app's business stay

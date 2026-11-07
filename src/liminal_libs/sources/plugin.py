@@ -34,6 +34,7 @@ state. This module imports no registry and no collector: the contract knows noth
 from __future__ import annotations
 
 import copy
+import inspect
 import math
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -46,6 +47,7 @@ from ..models import is_foreign
 from .fetching import Fetcher
 from .keys import KeyVar
 from .stream import Live
+from ..apps.authorization import Login  # the authorization interface a plugin holds once attached
 
 if TYPE_CHECKING:
     from ..config import Settings, Tier
@@ -177,6 +179,14 @@ class Plugin:
     # its own fetching (API 1.9; sources/fetching.py): its jobs on the shared fetch queue, taken by a
     # worker of its own; None: fetched by the app (the bars sync, the news reader, `datasets`)
     fetcher: Fetcher | None = None
+    # The IPC surface (the user, 2026-11-06: "the plugins use an ABC plugin to communicate IPC between
+    # themselves and the APP for functionality"; "the plugin ABC will enumerate attached plugins and their
+    # API"; "the app plugins need to use the Abstract Base Class login as the only way to present an
+    # interface for IPC, between plugins and login and the app as far as AUTHORIZATION"): the hooks of
+    # its kind (what `interface` enumerates), the app it is attached to and that app's login (`attach`).
+    HOOKS: tuple[str, ...] = ("scan", "settings")
+    login: "Login | None" = None  # the one way to a key, an account or a password: self.login.key(self.name)
+    app: object = None  # the app it is attached to (an apps.App, the integrator's or the charts app's)
 
     def __init__(self, **attributes) -> None:
         """A plugin with these attributes set on it (a test's FeedPlugin(name=..., build=...)); a real
@@ -257,6 +267,43 @@ class Plugin:
             out.__dict__[k] = v
         return out
 
+    # -- the IPC surface --------------------------------------------------------------------------
+    def interface(self) -> dict:
+        """What this plugin offers its app, as the app enumerates it (App.plugins): its name, kind,
+        system, contract version and version, and the hooks it answers itself with their signatures
+        (the contract's defaults left out: `gives`). The same shape an app gives of itself."""
+        hooks: dict[str, str] = {}
+        for name in self.HOOKS:
+            if not self.gives(name):
+                continue
+            given = self.__dict__.get(name) if name in self.__dict__ else getattr(self, name, None)
+            try:
+                hooks[name] = str(inspect.signature(given)) if callable(given) else ""
+            except (TypeError, ValueError):
+                hooks[name] = "(...)"
+        return {"name": self.name, "kind": self.KIND, "system": self.SYSTEM, "api": self.api, "version": self.version,
+                "attached": self.app is not None, "hooks": hooks}
+
+    def attach(self, app, login: "Login | None") -> dict:
+        """Attached by `app`: the app and its login (the authorization interface of its namespace) are
+        this plugin's from here on; returns the interface the app records. A record is frozen: set
+        through object.__setattr__, as __init__ does."""
+        object.__setattr__(self, "app", app)
+        object.__setattr__(self, "login", login)
+        return self.interface()
+
+    def detach(self) -> None:
+        object.__setattr__(self, "app", None)
+        object.__setattr__(self, "login", None)
+
+    def ask(self, hook: str, *args, **kwargs):
+        """One of this plugin's hooks called by name (the app's `ask`; across the pipe once the
+        plugin is resident): only a hook `interface` lists; LookupError for any other name."""
+        if hook not in self.interface()["hooks"]:
+            raise LookupError(f"{self.name or type(self).__name__} offers no {hook!r}")
+        given = self.__dict__.get(hook) if hook in self.__dict__ else getattr(self, hook)
+        return given(*args, **kwargs)
+
     def refusal(self) -> str | None:
         """Why the registry cannot take it: no name, or a database it may not write (databases_refused)."""
         if not self.name:
@@ -293,6 +340,8 @@ class FeedPlugin(IntegratorPlugin):
 
     CONTRACT = True
     KIND = "feed"
+    HOOKS = ("build", "view", "rate", "has_keys", "serves", "markets", "carries", "plan_resolutions", "reporter", "scan",
+             "settings")
 
     assets: frozenset = frozenset()  # asset classes it can collect at all (with keys / on some plan)
     keyless: frozenset = frozenset()  # asset classes served without its keys (Alpaca: crypto)
